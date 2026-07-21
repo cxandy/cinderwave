@@ -1,0 +1,25 @@
+# Build output
+build/
+out/
+cmake-build-*/
+*.o
+*.obj
+*.a
+*.lib
+*.exe
+
+# Rendered audio artifacts
+*.wav
+
+# RP2040 build products
+firmware/rp2040/build/
+*.uf2
+*.elf
+*.bin
+
+# Editor/OS cruft
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

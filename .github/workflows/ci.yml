@@ -1,0 +1,67 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  host:
+    name: host build + tests + demo render
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y cmake g++
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release -j
+
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Render demo pattern
+        run: ./build/cinderwave_render cinderwave_demo.wav
+
+      - name: Upload demo WAV
+        uses: actions/upload-artifact@v4
+        with:
+          name: cinderwave-demo-wav
+          path: cinderwave_demo.wav
+
+  firmware:
+    name: RP2040 firmware build (.uf2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ARM toolchain
+        run: >
+          sudo apt-get update &&
+          sudo apt-get install -y cmake gcc-arm-none-eabi
+          libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib
+          build-essential python3
+
+      - name: Fetch Pico SDK
+        run: |
+          git clone --depth 1 --branch 2.1.0 https://github.com/raspberrypi/pico-sdk.git "$HOME/pico-sdk"
+          cd "$HOME/pico-sdk" && git submodule update --init --depth 1
+
+      - name: Configure firmware
+        env:
+          PICO_SDK_PATH: /home/runner/pico-sdk
+        run: cmake -S firmware/rp2040 -B firmware/rp2040/build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build firmware
+        run: cmake --build firmware/rp2040/build -j
+
+      - name: Upload UF2
+        uses: actions/upload-artifact@v4
+        with:
+          name: cinderwave-firmware-uf2
+          path: firmware/rp2040/build/*.uf2
