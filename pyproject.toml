@@ -1,0 +1,37 @@
+[build-system]
+requires = ["scikit-build-core>=0.10"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "cinderwave"
+version = "0.1.0"
+description = "Host renderer for the Cinderwave acid groovebox: bakes patterns to WAV through the same zero-dependency C++17 DSP core that runs on the RP2040 hardware."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Makeph" }]
+keywords = ["synthesizer", "audio", "dsp", "acid", "groovebox", "rp2040", "cli"]
+classifiers = [
+    "Environment :: Console",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: C++",
+    "Topic :: Multimedia :: Sound/Audio :: Sound Synthesis",
+]
+
+[project.urls]
+Homepage = "https://github.com/Makeph/cinderwave"
+Repository = "https://github.com/Makeph/cinderwave"
+Issues = "https://github.com/Makeph/cinderwave/issues"
+
+[tool.scikit-build]
+# Compiled binary, not a Python module -> version-independent, one wheel/platform.
+wheel.py-api = "py3"
+wheel.packages = []
+# Only build the host renderer (skip the test binary) at install time.
+build.targets = ["cinderwave_render"]
+cmake.version = ">=3.16"
+minimum-version = "0.10"
+
+[tool.scikit-build.sdist]
+include = ["src/**", "include/**", "host/**", "CMakeLists.txt", "cmake/**", "README.md", "LICENSE"]
+exclude = ["build/**", "firmware/**", "hardware/**", "patterns/**", "docs/**", "*.wav"]

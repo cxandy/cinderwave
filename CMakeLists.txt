@@ -30,6 +30,15 @@ target_include_directories(cinderwave_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/in
 add_executable(cinderwave_render host/render.cpp)
 target_link_libraries(cinderwave_render PRIVATE cinderwave_core)
 
+# Install rule -- used by scikit-build-core to ship the host renderer as a pip
+# console script. Only the renderer is installed (not the test binary).
+include(GNUInstallDirs)
+if(DEFINED SKBUILD_SCRIPTS_DIR)
+    install(TARGETS cinderwave_render RUNTIME DESTINATION "${SKBUILD_SCRIPTS_DIR}")
+else()
+    install(TARGETS cinderwave_render RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+endif()
+
 # ---- Tests -----------------------------------------------------------------
 enable_testing()
 add_executable(cinderwave_tests
