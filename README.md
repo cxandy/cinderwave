@@ -3,8 +3,8 @@
 **An open-hardware acid groovebox that fits on a $4 microcontroller.**
 
 Cinderwave is a monophonic synth voice and 16-step sequencer in the TB-303
-idiom — band-limited oscillators, a resonant zero-delay-feedback filter,
-per-step accent and slide — running on a Raspberry Pi Pico (RP2040). The entire
+idiom, band-limited oscillators, a resonant zero-delay-feedback filter,
+per-step accent and slide running on a Raspberry Pi Pico (RP2040). The entire
 DSP core is platform-independent C++17 with **no dynamic allocation, no
 exceptions, and no dependencies**, so the *exact same code* that drives the
 hardware also renders a `.wav` on your desktop.
