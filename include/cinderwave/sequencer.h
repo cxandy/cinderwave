@@ -47,6 +47,18 @@ public:
     // event.trigger/release are false on the vast majority of samples.
     StepEvent tick();
 
+    // External clock support.
+    //
+    // While enabled the internal tempo is ignored and the sequence only moves
+    // when advance() is called. The firmware calls advance() on each edge of
+    // the external clock signal, so the box can be slaved to another machine.
+    void setExternalClock(bool enabled) { externalClock_ = enabled; }
+    bool externalClock() const { return externalClock_; }
+
+    // Advance to the next step immediately, regardless of tempo. Returns the
+    // event describing what changed.
+    StepEvent advance();
+
 private:
     int    sampleRate_;
     Sample bpm_ = 120.0f;
@@ -56,7 +68,11 @@ private:
     bool   running_ = false;
     bool   pendingStart_ = false; // emit step 0 on the first tick after start()
     bool   slidingFromPrev_ = false;
+    bool   externalClock_ = false;
     Step   steps_[kNumSteps];
+
+    // Shared by tick() and advance(): move to the next step and report it.
+    StepEvent advanceToNextStep();
 };
 
 } // namespace cw

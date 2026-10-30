@@ -44,19 +44,27 @@ ctest --test-dir build --output-on-failure     # DSP unit tests
 
 ## Build the hardware
 
-Full bill of materials, GPIO pin map, and two audio-output options (a budget
-PWM + RC filter, or a PCM5102A I2S DAC) live in
+Full bill of materials, GPIO pin map, and wiring notes live in
 **[hardware/BUILD.md](hardware/BUILD.md)**.
 
-Minimum viable Cinderwave:
+This build targets a Raspberry Pi Pico (RP2040) with an ILI9341 320x240
+display, sixteen Cherry MX keys and two audio outputs:
 
 | Part                        | Qty | Notes                                  |
 |-----------------------------|-----|----------------------------------------|
 | Raspberry Pi Pico (RP2040)  | 1   | the whole synth                        |
+| ILI9341 TFT, 320x240        | 1   | SPI @ 24 MHz, rotation 3               |
 | 10 kΩ linear potentiometer  | 3   | cutoff, resonance, tempo               |
-| Tactile button              | 1   | play / stop                            |
-| 1.8 kΩ resistor + 10 nF cap | 1   | RC reconstruction filter (~16 kHz)     |
-| 10 µF cap + 3.5 mm jack      | 1   | DC-blocked line out                    |
+| Cherry MX switch            | 16  | 2 rows of 8, the 16 sequencer steps    |
+| 3.5 mm audio jack           | 2   | OUT-A (filtered) and OUT-B (raw)       |
+| 100 Ω + 10 nF + 10 µF       | 1   | OUT-A reconstruction filter + DC block |
+| 470 Ω                       | 1   | OUT-B series resistor                  |
+
+> **Two things worth fixing on the board** — the OUT-A RC corner sits at
+> 159 kHz, which leaves the PWM carrier almost unattenuated, and OUT-A has no
+> DC-blocking capacitor. See
+> [hardware/BUILD.md](hardware/BUILD.md#two-things-to-fix-on-the-board) for the
+> recommended values.
 
 ## Flash the firmware
 
@@ -69,8 +77,25 @@ cmake --build build -j
 
 Hold **BOOTSEL** while plugging in the Pico, then drop
 `build/cinderwave_firmware.uf2` onto the `RPI-RP2` drive. It boots straight into
-the demo pattern; the three pots take over cutoff, resonance, and tempo, and the
-button toggles playback.
+the demo pattern.
+
+Every push builds the core, runs the unit tests, renders the demo WAV, and
+cross-compiles the RP2040 `.uf2` — both artifacts are uploaded from the run.
+See [.github/workflows/ci.yml](.github/workflows/ci.yml).
+
+## Using it
+
+The screen mirrors the physical 2x8 key grid, so the on-screen grid is always
+a map of the keys.
+
+| Gesture | Effect |
+|---------|--------|
+| Tap | toggle the gate of that step, and select it |
+| Medium hold | toggle the accent of that step |
+| Long hold | become the function modifier — the grid switches to function labels |
+
+Turn the pots to sweep the filter and change tempo. The `CLOCK` function
+switches the sequence over to the external clock input on GPIO8.
 
 ## Layout
 
@@ -78,16 +103,16 @@ button toggles playback.
 include/cinderwave/   Public API — the frozen DSP contract (headers only)
 src/                  DSP core: oscillator, envelope, filter, voice, sequencer, synth
 host/                 Desktop WAV renderer (uses the identical core)
-firmware/rp2040/      Pico SDK target: PWM audio + pot/button controls
+firmware/rp2040/      Pico SDK target: PWM audio + TFT + keypad + pots
+  pins.h                The single source of truth for the GPIO pin map
+  audio.cpp/h           Dual PWM output (one shared wrap interrupt)
+  display.cpp/h         ILI9341 SPI driver and drawing primitives
+  keypad.cpp/h          16-key scanner with time-based debouncing
+  font5x7.h             5x7 bitmap font
+  bin2uf2.py            bin -> UF2 packer (keeps picotool out of CI)
 tests/                Dependency-free unit tests (built and run in CI)
 hardware/             Build guide, BOM, wiring, pin map
 ```
-
-## Continuous integration
-
-Every push builds the core, runs the unit tests, renders the demo WAV, and
-cross-compiles the RP2040 `.uf2` — both artifacts are uploaded from the run. See
-[.github/workflows/ci.yml](.github/workflows/ci.yml).
 
 ## License
 

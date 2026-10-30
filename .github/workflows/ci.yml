@@ -55,10 +55,23 @@ jobs:
       - name: Configure firmware
         env:
           PICO_SDK_PATH: /home/runner/pico-sdk
-        run: cmake -S firmware/rp2040 -B firmware/rp2040/build -DCMAKE_BUILD_TYPE=Release
+        run: >
+          cmake -S firmware/rp2040 -B firmware/rp2040/build
+          -DCMAKE_BUILD_TYPE=Release
+          -DPICO_NO_UF2=1
+          -DPICO_NO_PICOTOOL=1
 
       - name: Build firmware
         run: cmake --build firmware/rp2040/build -j
+
+      - name: Package UF2
+        # PICO_NO_UF2 above keeps the SDK from building picotool (a Rust
+        # binary) just to convert the ELF. The raw .bin that the build already
+        # produces is wrapped into a UF2 here instead.
+        run: >
+          python firmware/rp2040/bin2uf2.py
+          firmware/rp2040/build/cinderwave_firmware.bin
+          firmware/rp2040/build/cinderwave_firmware.uf2
 
       - name: Upload UF2
         uses: actions/upload-artifact@v4

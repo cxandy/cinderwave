@@ -12,6 +12,10 @@ pico_sdk_init()
 
 add_executable(cinderwave_firmware
     main.cpp
+    # Hardware-facing modules for this board (see pins.h for the pin map).
+    audio.cpp
+    display.cpp
+    keypad.cpp
     # The platform-independent DSP core, compiled straight into the firmware.
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/oscillator.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/envelope.cpp
@@ -30,6 +34,9 @@ target_link_libraries(cinderwave_firmware
     hardware_pwm
     hardware_adc
     hardware_irq
+    hardware_spi
+    hardware_gpio
+    hardware_timer
 )
 
 # Enable USB serial for debug logging; disable UART.

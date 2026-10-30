@@ -1,72 +1,17 @@
 # Cinderwave — Hardware Build Guide
 
-Everything you need to turn a Raspberry Pi Pico into the Cinderwave groovebox.
-Two audio-output options are covered: a **budget** PWM + RC filter you can build
-from the junk drawer, and a **recommended** I2S DAC for clean line-level audio.
+This build guide describes the machine the firmware in this repo actually
+targets:
 
----
-
-## Bill of materials
-
-| Part | Qty | ~Price (EUR) | Notes |
-|------|-----|-------------|-------|
-| Raspberry Pi Pico (RP2040) | 1 | 4 | The whole synth. Pico / Pico W / Pico 2 all work. |
-| PCM5102A I2S DAC board | 1 | 4 | *Recommended* output. Skip if using PWM + RC. |
-| 10 kΩ linear potentiometer | 3 | 1.5 | Cutoff, resonance, tempo. |
-| Tactile push button | 4 | 0.5 | Play/stop (required) + step-edit/accent/shift (future). |
-| Rotary encoder (EC11) | 1 | 1.5 | *Optional* — pattern/step scrolling. |
-| 1.8 kΩ resistor | 1 | 0.05 | RC filter R (PWM output only). |
-| 10 nF ceramic capacitor | 1 | 0.05 | RC filter C (PWM output only). |
-| 10 µF electrolytic capacitor | 1 | 0.1 | DC-blocking on line out. |
-| 3.5 mm audio jack | 1 | 0.5 | Line/headphone out. |
-| Half-size breadboard or protoboard | 1 | 3 | Assembly. |
-| Hookup wire / jumpers | — | 2 | — |
-
-Total: roughly **€15–20**, most of which is the breadboard and jack.
-
----
-
-## Audio output — option A: budget PWM + RC filter
-
-The RP2040 has no DAC, but a PWM pin driven at the sample rate plus a first-order
-RC low-pass makes a serviceable 1-bit-ish DAC. The firmware wraps a PWM slice at
-32 kHz and writes one sample per period on **GPIO0**.
-
-```
- GPIO0 ──[ 1.8kΩ ]──┬──────[ 10µF + ]──────▶ 3.5mm TIP (left/mono)
-                    │
-                 [ 10nF ]
-                    │
-                   GND ──────────────────────▶ 3.5mm SLEEVE (GND)
-```
-
-- **R = 1.8 kΩ, C = 10 nF** → corner ≈ 1 / (2π·R·C) ≈ **8.8 kHz**. For a brighter
-  top end use 1.0 kΩ + 10 nF (≈16 kHz); for less carrier bleed use 1.8 kΩ + 22 nF.
-- The **10 µF** series cap blocks the ~1.65 V DC bias so you don't push DC into an
-  amp or headphones. Its + terminal faces the RC node.
-- This output is line-ish level and drives headphones quietly. For anything loud,
-  feed it into a powered speaker or a small amp.
-
-## Audio output — option B: PCM5102A I2S DAC (recommended)
-
-Clean 16-bit stereo, no carrier whine. Wire the Pico's I2S pins to the DAC:
-
-| Pico pin | Signal | PCM5102A pin |
-|----------|--------|--------------|
-| GPIO18   | BCK (bit clock)   | BCK  |
-| GPIO19   | LRCK / WS (word)  | LRCK |
-| GPIO20   | DIN (data)        | DIN  |
-| 3V3(OUT) | power             | VCC / VIN |
-| GND      | ground            | GND  |
-
-On the PCM5102A breakout, tie the config pins for standard I2S, software-format:
-- **SCK** → GND (the DAC runs on an internal PLL; no master clock needed)
-- **FMT** → GND (I2S)
-- **XMT** → 3V3 (un-mute)
-
-> The reference firmware ships the **PWM output (option A)** so it builds against
-> a bare Pico SDK with no extra PIO/I2S library. An I2S sink is a drop-in
-> replacement for `on_pwm_wrap()` — the DSP core doesn't change.
+| Part | Notes |
+|------|-------|
+| Raspberry Pi Pico (RP2040) | the whole synth. Pico / Pico W / Pico 2 all work. |
+| ILI9341 TFT, 320×240 | SPI @ 24 MHz, rotation 3 |
+| 3× 10 kΩ linear potentiometer | cutoff, resonance, tempo |
+| 16× Cherry MX switch | two rows of eight, 16 sequencer steps |
+| 2× 3.5 mm jack | OUT-A (filtered voice) and OUT-B (raw voice) |
+| 100 Ω + 10 nF + 10 µF | OUT-A reconstruction filter and DC block |
+| 470 Ω | OUT-B series resistor |
 
 ---
 
@@ -74,37 +19,189 @@ On the PCM5102A breakout, tie the config pins for standard I2S, software-format:
 
 | Function | Pico GPIO | Detail |
 |----------|-----------|--------|
-| PWM audio out | GPIO0 | Option A only; feeds the RC filter |
-| I2S BCK / LRCK / DIN | GPIO18 / 19 / 20 | Option B only |
+| TFT SCK | GPIO6 | SPI0 |
+| TFT MOSI | GPIO7 | SPI0, write-only (no MISO is wired) |
+| TFT DC | GPIO10 | data / command |
+| TFT CS | GPIO13 | chip select, active low |
+| TFT RST | GPIO8 | **strapped to 3V3** — the panel is never software-reset, and the firmware does not drive this pin |
+| Audio OUT-A | GPIO15 | PWM slice 7 ch B → 100 Ω + 10 nF RC → jack |
+| Audio OUT-B | GPIO2 | PWM slice 1 ch A → 470 Ω → jack |
 | Cutoff pot | GPIO26 (ADC0) | wiper → ADC |
-| Resonance pot | GPIO27 (ADC1) | wiper → ADC |
-| Tempo pot | GPIO28 (ADC2) | wiper → ADC |
-| Play/stop button | GPIO2 | to GND, internal pull-up |
-| Step-edit / accent / shift | GPIO3 / 4 / 5 | reserved for firmware growth |
+| Tempo pot | GPIO27 (ADC1) | wiper → ADC |
+| Resonance pot | GPIO28 (ADC2) | wiper → ADC |
+| Keys, top row | GPIO14 12 11 16 17 19 20 21 | steps 1–8 |
+| Keys, bottom row | GPIO0 1 3 4 5 9 18 22 | steps 9–16 |
+| External clock | GPIO8 | input, rising edge advances the sequence |
+
+### Notes on this pin map
+
+- **GPIO8 does double duty in the schematic** — it is the TFT reset line *and*
+  the external clock jack. Because the reset line is permanently jumpered to
+  3V3 the panel is always out of reset, so the firmware leaves GPIO8 alone for
+  the display and uses it only for the clock input. If you ever want a
+  software reset, move the clock jack to another pin (or add a reset button);
+  the firmware will then need `kTftResetPin` to be driven as well.
+
+- **The PWM output and the keypad share GPIO pairs.** The RP2040 hardwires each
+  PWM slice to a pair of pins (slice 7 → GPIO14/GPIO15, slice 1 → GPIO2/GPIO3).
+  Only the pin that asks for `GPIO_FUNC_PWM` sees the PWM output, so GPIO14 and
+  GPIO3 stay usable as push buttons while their slice-mates drive the jacks.
+
+- **The RP2040 has a single PWM interrupt** (`NUM_PWM_IRQS == 1`). Both outputs
+  are written from one wrap interrupt on the OUT-A slice; the OUT-B slice
+  free-runs with an identical clkdiv and wrap, so the two stay phase-locked.
 
 ---
 
-## Wiring notes
+## Audio outputs
 
-- **Potentiometers** wire as voltage dividers: outer legs to **3V3** and **GND**,
-  wiper to the ADC GPIO. The firmware reads the 12-bit ADC and maps it
-  exponentially (musical for cutoff and tempo).
-- **Buttons** connect the GPIO to **GND**; the firmware enables the internal
-  pull-up, so a press reads low (active-low). No external resistor needed.
-- **Grounding:** star-ground the DAC/RC output back to a single Pico GND pin to
-  keep digital switching noise out of the audio. Keep the audio wire short.
-- **Power:** a USB cable from your computer or a 5 V phone charger is plenty. The
-  Pico's on-board regulator supplies 3V3 to the pots and DAC.
+```
+ OUT-A:  GPIO15 ──[ 100Ω ]──┬─────────────[ 10µF ]──────▶ 3.5 mm
+                            │                              (TIP)
+                         [ 10nF ]
+                            │
+                           GND ──────────────────────────▶ 3.5 mm (SLEEVE)
+
+ OUT-B:  GPIO2  ──[ 470Ω ]──────────────────────────────▶ 3.5 mm
+```
+
+- **OUT-A carries the full voice**: oscillator → resonant filter → VCA →
+  master gain.
+- **OUT-B carries the same frame with the filter bypassed** (oscillator → VCA).
+  A physical potentiometer cross-mixes the two, so you can dial anywhere
+  between "dark and filtered" and "bright and raw". The firmware can also mute
+  OUT-B entirely (see the `OUT-B` function key).
+
+### Two things to fix on the board
+
+1. **The RC corner frequency is far too high.** With R = 100 Ω and C = 10 nF
+   the corner is `1/(2π·R·C)` ≈ **159 kHz**, which attenuates the 32 kHz PWM
+   carrier by only 0.34 dB — you will hear raw PWM buzz on OUT-A. Use
+   **100 Ω + 100 nF** (corner ≈ 15.9 kHz, −7 dB at the carrier) or
+   **100 Ω + 220 nF** (corner ≈ 7.2 kHz, −13 dB) instead.
+
+2. **OUT-A has no DC blocking capacitor.** The PWM output is unipolar, so at
+   50 % duty it sits at ~1.65 V DC. A **10 µF electrolytic in series** (＋
+   toward the RC node) blocks that; with a 470 Ω load it puts the corner at
+   roughly 28 Hz. Without it you push DC into whatever you plug the jack into.
+
+OUT-B currently has neither a reconstruction filter nor a DC block. That is
+fine if OUT-B is meant to drive an external trigger input (the 470 Ω is a
+sensible series resistor for that), but if you want to listen to it, it needs
+the same 100 Ω + 100 nF + 10 µF treatment as OUT-A.
+
+---
+
+## Display
+
+The ILI9341 is wired to SPI0 and driven in 8-bit mode: commands and parameters
+go out as plain bytes, pixel data as big-endian RGB565 byte pairs.
+
+| TFT pin | Pico |
+|---------|------|
+| SCK | GPIO6 |
+| MOSI | GPIO7 |
+| DC | GPIO10 |
+| CS | GPIO13 |
+| RST | 3V3 (hard jumper — not GPIO8) |
+| VCC | 3V3 |
+| GND | GND |
+
+The panel runs at **rotation 3**, which is a 320×240 landscape orientation
+(`MADCTL = 0xE8`). If your panel ends up mirrored or sideways, change
+`kTftRotation` in `firmware/rp2040/pins.h` — that is the only thing you need
+to touch.
+
+The SPI clock is set to 24 MHz. The ILI9341 datasheet quotes 10 MHz as the
+nominal maximum, so 24 MHz is technically out of spec; it works on most
+breakout boards but if you see colour noise, drop `kTftSpiBaudrate` to
+12 MHz.
+
+---
+
+## Keypad
+
+16 independent Cherry MX switches — **no diode matrix**. Each switch connects
+one leg to its GPIO and the other to GND; the internal pull-up makes a press
+read LOW. Debouncing is time based (20 ms) and edges are queued, so a slow
+screen redraw can never swallow a press.
+
+### Gestures
+
+| Gesture | Effect |
+|---------|--------|
+| Tap (< 400 ms) | toggle the gate of that step, and select it |
+| Medium hold (400–900 ms) | toggle the accent of that step |
+| Long hold (≥ 900 ms) | become the function modifier: the grid on screen switches to function labels, and the other keys run those functions |
+
+The screen mirrors the physical 2×8 key grid in both layers, so the on-screen
+grid is always a map of the keys.
+
+### Function layer
+
+| Key | Function | Key | Function |
+|-----|----------|-----|----------|
+| 1 | PLAY / STOP | 9 | SELECT − |
+| 2 | ACCENT (on the selected step) | 10 | SELECT + |
+| 3 | SLIDE (on the selected step) | 11 | NOTE − |
+| 4 | OCTAVE − (transposes the pattern) | 12 | NOTE + |
+| 5 | OCTAVE + (transposes the pattern) | 13 | CLOCK (external clock in/out) |
+| 6 | WAVEFORM | 14 | OUT-B (raw / off) |
+| 7 | TEMPO (reset to 130 BPM) | 15 | DEMO (reload the demo pattern) |
+| 8 | CLEAR pattern | 16 | RESET everything |
+
+---
+
+## Pots
+
+Three potentiometers wire as voltage dividers: outer legs to **3V3** and
+**GND**, wiper to the ADC GPIO. The firmware reads the 12-bit ADC, discards
+the first conversion after switching channels (the RP2040 ADC carries the
+previous channel's value into it) and averages the next four.
+
+| Pot | GPIO | Range |
+|-----|------|-------|
+| Cutoff | GPIO26 (ADC0) | 120 Hz … 6 kHz, exponential |
+| Resonance | GPIO28 (ADC2) | Q 0.7 … 18 |
+| Tempo | GPIO27 (ADC1) | 60 … 180 BPM |
+
+---
+
+## External clock
+
+GPIO8 is an input. With the `CLOCK` function key enabled, the internal tempo
+is ignored and the sequence advances on each **rising edge** of the signal on
+GPIO8 — one edge per step. The edge is detected inside the audio interrupt, so
+the sequencer and the voice are never touched from two contexts at once.
+
+Wire it as a plain logic-level input with a common ground. A pull-down is
+enabled on GPIO8 so the pin idles low when nothing is plugged in.
 
 ---
 
 ## Flashing
 
 1. Build the firmware (see the repo README) to get `cinderwave_firmware.uf2`.
-2. Hold the **BOOTSEL** button on the Pico while plugging in USB.
+2. Hold **BOOTSEL** while plugging in USB.
 3. The Pico mounts as a USB drive named **RPI-RP2**.
 4. Drag `cinderwave_firmware.uf2` onto it. The Pico reboots and starts playing
    the demo pattern immediately.
 
-Turn the pots to sweep the filter and change tempo; tap the button to stop and
-start the sequence. Happy squelching.
+Turn the pots to sweep the filter and change tempo; tap the keys to write the
+pattern; hold a key for the function layer.
+
+### Building without picotool
+
+The Pico SDK normally converts the ELF to UF2 with `picotool`, which it builds
+from source with Rust. That is a heavy dependency for CI, so the firmware
+build here sets `PICO_NO_UF2=1` / `PICO_NO_PICOTOOL=1` and converts the raw
+binary instead:
+
+```sh
+arm-none-eabi-objcopy -O binary cinderwave_firmware.elf cinderwave_firmware.bin
+python firmware/rp2040/bin2uf2.py cinderwave_firmware.bin cinderwave_firmware.uf2
+```
+
+`bin2uf2.py` is plain Python with no dependencies — it writes the same UF2
+block format the bootloader expects (RP2040 family ID `0xe48bff56`, flash base
+`0x10000000`).
