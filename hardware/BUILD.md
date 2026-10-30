@@ -9,9 +9,9 @@ targets:
 | ILI9341 TFT, 320×240 | SPI @ 24 MHz, rotation 3 |
 | 3× 10 kΩ linear potentiometer | cutoff, resonance, tempo |
 | 16× Cherry MX switch | two rows of eight, 16 sequencer steps |
-| 2× 3.5 mm jack | OUT-A (filtered voice) and OUT-B (raw voice) |
+| 2× 3.5 mm jack | OUT-A (in use) and OUT-B (reserved) |
 | 100 Ω + 10 nF + 10 µF | OUT-A reconstruction filter and DC block |
-| 470 Ω | OUT-B series resistor |
+| 470 Ω | OUT-B series resistor (unused for now) |
 
 ---
 
@@ -25,35 +25,34 @@ targets:
 | TFT CS | GPIO13 | chip select, active low |
 | TFT RST | GPIO8 | **strapped to 3V3** — the panel is never software-reset, and the firmware does not drive this pin |
 | Audio OUT-A | GPIO15 | PWM slice 7 ch B → 100 Ω + 10 nF RC → jack |
-| Audio OUT-B | GPIO2 | PWM slice 1 ch A → 470 Ω → jack |
+| Audio OUT-B | GPIO2 | **reserved** — the firmware does not configure or drive this pin |
 | Cutoff pot | GPIO26 (ADC0) | wiper → ADC |
 | Tempo pot | GPIO27 (ADC1) | wiper → ADC |
 | Resonance pot | GPIO28 (ADC2) | wiper → ADC |
 | Keys, top row | GPIO14 12 11 16 17 19 20 21 | steps 1–8 |
 | Keys, bottom row | GPIO0 1 3 4 5 9 18 22 | steps 9–16 |
-| External clock | GPIO8 | input, rising edge advances the sequence |
+| Clock output | GPIO8 | drives a 10 ms pulse per step (or per beat) |
 
 ### Notes on this pin map
 
 - **GPIO8 does double duty in the schematic** — it is the TFT reset line *and*
-  the external clock jack. Because the reset line is permanently jumpered to
-  3V3 the panel is always out of reset, so the firmware leaves GPIO8 alone for
-  the display and uses it only for the clock input. If you ever want a
-  software reset, move the clock jack to another pin (or add a reset button);
-  the firmware will then need `kTftResetPin` to be driven as well.
+  the clock output jack. Because the reset line is permanently jumpered to 3V3
+  the panel is always out of reset, so the firmware leaves GPIO8 alone for the
+  display and uses it only as the clock output.
 
 - **The PWM output and the keypad share GPIO pairs.** The RP2040 hardwires each
-  PWM slice to a pair of pins (slice 7 → GPIO14/GPIO15, slice 1 → GPIO2/GPIO3).
-  Only the pin that asks for `GPIO_FUNC_PWM` sees the PWM output, so GPIO14 and
-  GPIO3 stay usable as push buttons while their slice-mates drive the jacks.
+  PWM slice to a pair of pins (slice 7 → GPIO14/GPIO15). Only the pin that asks
+  for `GPIO_FUNC_PWM` sees the PWM output, so GPIO14 stays usable as a push
+  button while its slice-mate drives the jack.
 
-- **The RP2040 has a single PWM interrupt** (`NUM_PWM_IRQS == 1`). Both outputs
-  are written from one wrap interrupt on the OUT-A slice; the OUT-B slice
-  free-runs with an identical clkdiv and wrap, so the two stay phase-locked.
+- **The RP2040 has a single PWM interrupt** (`NUM_PWM_IRQS == 1`). When OUT-B
+  comes back it will be a second PWM slice (GPIO2 is slice 1, channel A) whose
+  duty value is written from the *same* wrap interrupt — the slice free-runs
+  with an identical clkdiv and wrap, so the two stay phase-locked.
 
 ---
 
-## Audio outputs
+## Audio output
 
 ```
  OUT-A:  GPIO15 ──[ 100Ω ]──┬─────────────[ 10µF ]──────▶ 3.5 mm
@@ -61,16 +60,13 @@ targets:
                          [ 10nF ]
                             │
                            GND ──────────────────────────▶ 3.5 mm (SLEEVE)
-
- OUT-B:  GPIO2  ──[ 470Ω ]──────────────────────────────▶ 3.5 mm
 ```
 
 - **OUT-A carries the full voice**: oscillator → resonant filter → VCA →
   master gain.
-- **OUT-B carries the same frame with the filter bypassed** (oscillator → VCA).
-  A physical potentiometer cross-mixes the two, so you can dial anywhere
-  between "dark and filtered" and "bright and raw". The firmware can also mute
-  OUT-B entirely (see the `OUT-B` function key).
+- **OUT-B is reserved.** The firmware skips GP2 entirely — no PWM, no GPIO
+  setup. When it is given a job it will feed the same jack through the
+  potentiometer that cross-mixes the two outputs.
 
 ### Two things to fix on the board
 
@@ -84,11 +80,6 @@ targets:
    50 % duty it sits at ~1.65 V DC. A **10 µF electrolytic in series** (＋
    toward the RC node) blocks that; with a 470 Ω load it puts the corner at
    roughly 28 Hz. Without it you push DC into whatever you plug the jack into.
-
-OUT-B currently has neither a reconstruction filter nor a DC block. That is
-fine if OUT-B is meant to drive an external trigger input (the 470 Ω is a
-sensible series resistor for that), but if you want to listen to it, it needs
-the same 100 Ω + 100 nF + 10 µF treatment as OUT-A.
 
 ---
 
@@ -132,7 +123,11 @@ screen redraw can never swallow a press.
 |---------|--------|
 | Tap (< 400 ms) | toggle the gate of that step, and select it |
 | Medium hold (400–900 ms) | toggle the accent of that step |
+| **Two keys pressed together** | **PLAY / STOP** (a chord: both keys within 80 ms) |
 | Long hold (≥ 900 ms) | become the function modifier: the grid on screen switches to function labels, and the other keys run those functions |
+
+The chord is the fast way to start and stop — you never have to hunt for the
+function layer. The long hold is how the editing functions are reached.
 
 The screen mirrors the physical 2×8 key grid in both layers, so the on-screen
 grid is always a map of the keys.
@@ -145,9 +140,9 @@ grid is always a map of the keys.
 | 2 | ACCENT (on the selected step) | 10 | SELECT + |
 | 3 | SLIDE (on the selected step) | 11 | NOTE − |
 | 4 | OCTAVE − (transposes the pattern) | 12 | NOTE + |
-| 5 | OCTAVE + (transposes the pattern) | 13 | CLOCK (external clock in/out) |
-| 6 | WAVEFORM | 14 | OUT-B (raw / off) |
-| 7 | TEMPO (reset to 130 BPM) | 15 | DEMO (reload the demo pattern) |
+| 5 | OCTAVE + (transposes the pattern) | 13 | CLOCK (step / beat / off) |
+| 6 | WAVEFORM | 14 | REVERSE the pattern |
+| 7 | TEMPO (re-zero the pot at 130 BPM) | 15 | DEMO (reload the demo pattern) |
 | 8 | CLEAR pattern | 16 | RESET everything |
 
 ---
@@ -167,15 +162,25 @@ previous channel's value into it) and averages the next four.
 
 ---
 
-## External clock
+## Clock output
 
-GPIO8 is an input. With the `CLOCK` function key enabled, the internal tempo
-is ignored and the sequence advances on each **rising edge** of the signal on
-GPIO8 — one edge per step. The edge is detected inside the audio interrupt, so
-the sequencer and the voice are never touched from two contexts at once.
+GPIO8 is an output. It drives a **10 ms pulse** on every sequencer step, so
+another machine (a drum machine, a DAW, another Cinderwave) can follow this
+one. The `CLOCK` function key switches it between:
 
-Wire it as a plain logic-level input with a common ground. A pull-down is
-enabled on GPIO8 so the pin idles low when nothing is plugged in.
+- **STP** — one pulse per step (a 16th-note clock)
+- **BET** — one pulse per beat (every 4 steps)
+- **OFF** — the pin idles low
+
+The pulses are generated inside the audio interrupt, so they stay locked to
+the sequencer no matter what the main loop is doing.
+
+Wire it as a plain logic-level output with a common ground. The pulse is 3.3 V
+and 10 ms wide.
+
+> Clock *input* (slaving this box to an external clock) is not implemented
+> yet. When it is, it will need a sequencer change in the core plus an edge
+> detector — see `Sequencer::setExternalClock()` in a later revision.
 
 ---
 
@@ -188,7 +193,7 @@ enabled on GPIO8 so the pin idles low when nothing is plugged in.
    the demo pattern immediately.
 
 Turn the pots to sweep the filter and change tempo; tap the keys to write the
-pattern; hold a key for the function layer.
+pattern; press any two keys together to stop and start.
 
 ### Building without picotool
 

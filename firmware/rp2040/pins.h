@@ -7,11 +7,11 @@
 //   TFT    ILI9341 320x240, SPI @ 24 MHz, rotation 3
 //          SCK=GP6  MOSI=GP7  RST=GP8 (hard-jumpered to 3V3)  DC=GP10  CS=GP13
 //   Audio  OUT-A: GP15 -> 100 R + 10 nF RC -> 3.5 mm jack
-//          OUT-B: GP2  -> 470 R -> 3.5 mm jack
+//          OUT-B: GP2  -> 470 R -> 3.5 mm jack   (reserved, not driven yet)
 //          a physical pot cross-mixes OUT-A and OUT-B
 //   Pots   3 x potentiometer -> ADC: GP26 / GP28 / GP27
 //   Keys   16 x Cherry MX in two rows of eight (see kKeyPins)
-//   Clock  external clock jack on GP8
+//   Clock  external clock OUT on GP8
 //
 // Note on GP8: the TFT reset line is permanently strapped to 3V3, so the panel
 // is never software-reset and GP8 is left free for the external clock port.
@@ -62,13 +62,18 @@ constexpr int kTftWidth    = 320;
 constexpr int kTftHeight   = 240;
 
 // ---------------------------------------------------------------------------
-// Audio outputs — both are PWM slices driven from one shared IRQ
+// Audio outputs
 // ---------------------------------------------------------------------------
 
 // OUT-A: GP15 -> PWM slice 7, channel B -> 100 R + 10 nF RC filter -> jack.
 constexpr int kAudioOutAPin = 15;
 
 // OUT-B: GP2 -> PWM slice 1, channel A -> 470 R -> jack.
+//
+// RESERVED. The firmware deliberately does not configure or drive GP2 yet, so
+// the pin stays free for whatever the second output ends up carrying. When it
+// comes back it will be a second PWM slice written from the same wrap
+// interrupt (the RP2040 has only one PWM IRQ).
 constexpr int kAudioOutBPin = 2;
 
 // ---------------------------------------------------------------------------
@@ -101,9 +106,12 @@ constexpr int kKeyPins[kNumKeys] = {
 };
 
 // ---------------------------------------------------------------------------
-// External clock port
+// External clock output
 // ---------------------------------------------------------------------------
 
+// GP8 drives a short pulse (10 ms) on every sequencer step, or on every beat
+// if the clock mode is switched to BEAT. The TFT reset line is strapped to
+// 3V3, so this pin is not used by the display.
 constexpr int kClockPin = 8;  // GP8
 
 } // namespace cwp

@@ -48,7 +48,7 @@ Full bill of materials, GPIO pin map, and wiring notes live in
 **[hardware/BUILD.md](hardware/BUILD.md)**.
 
 This build targets a Raspberry Pi Pico (RP2040) with an ILI9341 320x240
-display, sixteen Cherry MX keys and two audio outputs:
+display, sixteen Cherry MX keys and an audio output:
 
 | Part                        | Qty | Notes                                  |
 |-----------------------------|-----|----------------------------------------|
@@ -56,9 +56,9 @@ display, sixteen Cherry MX keys and two audio outputs:
 | ILI9341 TFT, 320x240        | 1   | SPI @ 24 MHz, rotation 3               |
 | 10 kΩ linear potentiometer  | 3   | cutoff, resonance, tempo               |
 | Cherry MX switch            | 16  | 2 rows of 8, the 16 sequencer steps    |
-| 3.5 mm audio jack           | 2   | OUT-A (filtered) and OUT-B (raw)       |
+| 3.5 mm audio jack           | 2   | OUT-A (in use) and OUT-B (reserved)    |
 | 100 Ω + 10 nF + 10 µF       | 1   | OUT-A reconstruction filter + DC block |
-| 470 Ω                       | 1   | OUT-B series resistor                  |
+| 470 Ω                       | 1   | OUT-B series resistor (unused for now) |
 
 > **Two things worth fixing on the board** — the OUT-A RC corner sits at
 > 159 kHz, which leaves the PWM carrier almost unattenuated, and OUT-A has no
@@ -92,10 +92,16 @@ a map of the keys.
 |---------|--------|
 | Tap | toggle the gate of that step, and select it |
 | Medium hold | toggle the accent of that step |
+| **Two keys pressed together** | **PLAY / STOP** |
 | Long hold | become the function modifier — the grid switches to function labels |
 
+Pressing any two keys at once is the quick way to start and stop; the long
+hold is how the editing functions (accent, slide, octave, waveform, ...) are
+reached.
+
 Turn the pots to sweep the filter and change tempo. The `CLOCK` function
-switches the sequence over to the external clock input on GPIO8.
+switches the GPIO8 clock output between a pulse per step, a pulse per beat,
+and off.
 
 ## Layout
 
@@ -105,7 +111,7 @@ src/                  DSP core: oscillator, envelope, filter, voice, sequencer, 
 host/                 Desktop WAV renderer (uses the identical core)
 firmware/rp2040/      Pico SDK target: PWM audio + TFT + keypad + pots
   pins.h                The single source of truth for the GPIO pin map
-  audio.cpp/h           Dual PWM output (one shared wrap interrupt)
+  audio.cpp/h           PWM audio output on OUT-A (GP15)
   display.cpp/h         ILI9341 SPI driver and drawing primitives
   keypad.cpp/h          16-key scanner with time-based debouncing
   font5x7.h             5x7 bitmap font

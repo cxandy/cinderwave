@@ -43,13 +43,6 @@ public:
     // One sample of audio in [-1, 1] (before master gain).
     Sample process();
 
-    // The pre-filter signal of the most recent process() call: oscillator ->
-    // amp envelope -> accent gain, with the resonant filter bypassed.
-    //
-    // The firmware routes this to the second (OUT-B) jack so that a hardware
-    // potentiometer can blend the filtered voice with the raw oscillator.
-    Sample raw() const { return raw_; }
-
     static Sample midiToHz(int note);
 
 private:
@@ -67,7 +60,6 @@ private:
     Sample glideCoef_ = 0.0f;
     bool   gliding_ = false;
     bool   accent_ = false;
-    Sample raw_ = 0.0f;        // last process() call, filter bypassed
 };
 
 } // namespace cw

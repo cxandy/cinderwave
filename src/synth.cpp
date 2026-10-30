@@ -64,7 +64,7 @@ void Synth::renderBlock(Sample* out, int count) {
     }
 }
 
-Sample Synth::renderSample(Sample* rawOut) {
+Sample Synth::renderSample() {
     const StepEvent ev = seq_.tick();
     if (ev.release && !ev.slide) {
         voice_.noteOff();
@@ -72,11 +72,7 @@ Sample Synth::renderSample(Sample* rawOut) {
     if (ev.trigger) {
         voice_.noteOn(ev.note, ev.accent, ev.slide);
     }
-    const Sample s = voice_.process();
-    if (rawOut) {
-        *rawOut = voice_.raw();
-    }
-    return s * masterGain_;
+    return voice_.process() * masterGain_;
 }
 
 } // namespace cw

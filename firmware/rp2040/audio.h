@@ -1,15 +1,14 @@
-// Dual PWM audio output.
+// Single PWM audio output.
 //
 //   OUT-A : GP15 -> PWM slice 7 channel B -> 100 R + 10 nF RC -> 3.5 mm jack
-//   OUT-B : GP2  -> PWM slice 1 channel A -> 470 R -> 3.5 mm jack
 //
-// The RP2040 has exactly ONE PWM interrupt (NUM_PWM_IRQS == 1), and the two
-// outputs sit on different slices, so both duty values are written from a
-// single wrap interrupt on the OUT-A slice. Slice 1 free-runs with an
-// identical clkdiv and wrap, so it stays phase-locked to slice 7.
+// OUT-B (GP2) is reserved for now: the firmware does not configure the pin and
+// does not drive it. The board has a second jack and a potentiometer that
+// cross-mixes the two outputs, so when OUT-B comes back it will be a second
+// PWM slice (GP2 is PWM slice 1, channel A) fed from the same wrap interrupt.
 //
-// A physical potentiometer cross-mixes OUT-A and OUT-B outside the
-// microcontroller; the firmware just has to feed each output its own signal.
+// The RP2040 has exactly ONE PWM interrupt (NUM_PWM_IRQS == 1), so a second
+// output has to be written from the same handler rather than from its own.
 #ifndef CINDERWAVE_AUDIO_H
 #define CINDERWAVE_AUDIO_H
 
@@ -19,21 +18,16 @@
 
 namespace cwa {
 
-// One stereo-ish frame: the value destined for each physical output.
-struct AudioFrame {
-    cw::Sample a = 0.0f;  // OUT-A (GP15)
-    cw::Sample b = 0.0f;  // OUT-B (GP2)
-};
-
-// Called from the PWM wrap interrupt. Keep it fast and non-blocking.
-using RenderFn = void (*)(AudioFrame&);
+// Called from the PWM wrap interrupt to produce one sample. Keep it fast and
+// non-blocking.
+using RenderFn = cw::Sample (*)();
 
 class AudioOut {
 public:
-    // Starts both PWM slices and installs the wrap interrupt.
+    // Starts the PWM slice and installs the wrap interrupt.
     void init(RenderFn render);
 
-    // The rate the PWM slices actually run at, in Hz (32002.6 with the
+    // The rate the PWM slice actually runs at, in Hz (32002.6 with the
     // default wrap).
     uint32_t actualRate() const { return actualRate_; }
 

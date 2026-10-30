@@ -16,16 +16,14 @@ namespace {
 // exact; only the absolute pitch drifts by a hair).
 constexpr uint16_t kPwmWrap = 3905;
 
-// Slice / channel for each output.
+// Slice / channel for OUT-A.
 //
 // The RP2040 hardwires PWM slices to GPIO pairs: slice 7 -> GP14 (A) / GP15
-// (B), slice 1 -> GP2 (A) / GP3 (B). GP14 and GP3 are keypad buttons on this
-// board, which is harmless: a GPIO only sees the PWM output if it asks for
-// GPIO_FUNC_PWM, and the slice itself keeps running either way.
-uint g_outASlice = 0;
-uint g_outAChan = 0;
-uint g_outBSlice = 0;
-uint g_outBChan = 0;
+// (B). GP14 is a keypad button on this board, which is harmless: a GPIO only
+// sees the PWM output if it asks for GPIO_FUNC_PWM, and the slice itself
+// keeps running either way.
+uint g_outSlice = 0;
+uint g_outChan  = 0;
 
 RenderFn g_render = nullptr;
 
@@ -38,15 +36,14 @@ inline uint16_t toLevel(cw::Sample s) {
     return static_cast<uint16_t>(level);
 }
 
-// The one hot path: render one sample, push both duty values.
+// The one hot path: render one sample, push the duty value.
 void __not_in_flash_func(on_pwm_wrap)() {
-    pwm_clear_irq(g_outASlice);
+    pwm_clear_irq(g_outSlice);
 
-    AudioFrame frame;
-    if (g_render) g_render(frame);
+    cw::Sample s = 0.0f;
+    if (g_render) s = g_render();
 
-    pwm_set_chan_level(g_outASlice, g_outAChan, toLevel(frame.a));
-    pwm_set_chan_level(g_outBSlice, g_outBChan, toLevel(frame.b));
+    pwm_set_chan_level(g_outSlice, g_outChan, toLevel(s));
 }
 
 } // namespace
@@ -55,28 +52,21 @@ void AudioOut::init(RenderFn render) {
     g_render = render;
 
     gpio_set_function(cwp::kAudioOutAPin, GPIO_FUNC_PWM);
-    gpio_set_function(cwp::kAudioOutBPin, GPIO_FUNC_PWM);
 
-    g_outASlice = pwm_gpio_to_slice_num(cwp::kAudioOutAPin);
-    g_outAChan = pwm_gpio_to_channel(cwp::kAudioOutAPin);
-    g_outBSlice = pwm_gpio_to_slice_num(cwp::kAudioOutBPin);
-    g_outBChan = pwm_gpio_to_channel(cwp::kAudioOutBPin);
+    g_outSlice = pwm_gpio_to_slice_num(cwp::kAudioOutAPin);
+    g_outChan  = pwm_gpio_to_channel(cwp::kAudioOutAPin);
 
     pwm_config cfg = pwm_get_default_config();
     pwm_config_set_clkdiv(&cfg, 1.0f);
     pwm_config_set_wrap(&cfg, kPwmWrap);
 
-    pwm_init(g_outASlice, &cfg, true);
-    pwm_init(g_outBSlice, &cfg, true);
+    pwm_init(g_outSlice, &cfg, true);
 
     // Silence until the first sample arrives (duty 0 == 0 V, no DC offset).
-    pwm_set_chan_level(g_outASlice, g_outAChan, 0);
-    pwm_set_chan_level(g_outBSlice, g_outBChan, 0);
+    pwm_set_chan_level(g_outSlice, g_outChan, 0);
 
-    // Only the OUT-A slice raises the interrupt. The RP2040 has a single PWM
-    // IRQ shared by all slices, and the handler writes both duty values.
-    pwm_clear_irq(g_outASlice);
-    pwm_set_irq_enabled(g_outASlice, true);
+    pwm_clear_irq(g_outSlice);
+    pwm_set_irq_enabled(g_outSlice, true);
     irq_set_exclusive_handler(PWM_IRQ_WRAP, on_pwm_wrap);
     irq_set_enabled(PWM_IRQ_WRAP, true);
 

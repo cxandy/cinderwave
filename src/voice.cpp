@@ -71,12 +71,8 @@ Sample Voice::process() {
     const Sample cutoff = patch_.cutoff + fLevel * (patch_.envMod + accentMod);
     filter_.setCutoff(cutoff);
 
-    const Sample oscSample = osc_.process();
-    const Sample filtered = filter_.process(oscSample);
+    const Sample filtered = filter_.process(osc_.process());
     const Sample accentGain = accent_ ? 1.0f + patch_.accentAmount : 1.0f;
-
-    // Same envelope, no filter: the "raw" path that feeds OUT-B.
-    raw_ = clampf(oscSample * ampLevel * accentGain, -1.0f, 1.0f);
     return clampf(filtered * ampLevel * accentGain, -1.0f, 1.0f);
 }
 

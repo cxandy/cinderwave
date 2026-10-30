@@ -30,12 +30,7 @@ public:
     void renderBlock(Sample* out, int count);
 
     // Convenience for tests / single-sample hosts.
-    //
-    // When `rawOut` is non-null it receives the pre-filter signal of the same
-    // frame (see Voice::raw()), so a host that drives two outputs can take
-    // the filtered voice on one and the raw oscillator on the other without
-    // rendering the frame twice.
-    Sample renderSample(Sample* rawOut = nullptr);
+    Sample renderSample();
 
 private:
     int       sampleRate_;

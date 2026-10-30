@@ -69,13 +69,6 @@ StepEvent Sequencer::tick() {
         return ev;
     }
 
-    // In external clock mode the sequence only moves on an external edge, so
-    // there is nothing for the sample tick to do (not even the downbeat:
-    // advance() handles that).
-    if (externalClock_) {
-        return ev;
-    }
-
     // First tick after start(): sound step 0 on the downbeat rather than
     // waiting a full bar for the sequence to wrap around to it.
     if (pendingStart_) {
@@ -98,36 +91,6 @@ StepEvent Sequencer::tick() {
     }
 
     phase_ -= samplesPerStep_;
-    return advanceToNextStep();
-}
-
-StepEvent Sequencer::advance() {
-    StepEvent ev{};
-    if (!running_) {
-        return ev;
-    }
-
-    // The first external edge fires step 0, mirroring the downbeat behaviour
-    // of the internal clock.
-    if (pendingStart_) {
-        pendingStart_ = false;
-        const Step first = steps_[current_];
-        ev.index = current_;
-        ev.release = false;
-        if (first.gate) {
-            ev.trigger = true;
-            ev.note = first.note;
-            ev.accent = first.accent;
-            ev.slide = first.slide;
-        }
-        return ev;
-    }
-
-    return advanceToNextStep();
-}
-
-StepEvent Sequencer::advanceToNextStep() {
-    StepEvent ev{};
     const Step previous = steps_[current_];
     slidingFromPrev_ = previous.slide;
     current_ = (current_ + 1) % kNumSteps;
