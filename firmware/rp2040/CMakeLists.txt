@@ -16,6 +16,8 @@ add_executable(cinderwave_firmware
     audio.cpp
     display.cpp
     keypad.cpp
+    midi.cpp
+    storage.cpp
     # The platform-independent DSP core, compiled straight into the firmware.
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/oscillator.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/envelope.cpp
@@ -37,6 +39,8 @@ target_link_libraries(cinderwave_firmware
     hardware_spi
     hardware_gpio
     hardware_timer
+    hardware_uart
+    hardware_flash
 )
 
 # Enable USB serial for debug logging; disable UART.

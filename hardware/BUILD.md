@@ -31,7 +31,7 @@ targets:
 | Resonance pot | GPIO28 (ADC2) | wiper → ADC |
 | Keys, top row | GPIO14 12 11 16 17 19 20 21 | steps 1–8 |
 | Keys, bottom row | GPIO0 1 3 4 5 9 18 22 | steps 9–16 |
-| Clock output | GPIO8 | drives a 10 ms pulse per step (or per beat) |
+| Clock / MIDI output | GPIO8 | 10 ms pulse per step/beat, or UART1 TX MIDI clock |
 
 ### Notes on this pin map
 
@@ -162,25 +162,53 @@ previous channel's value into it) and averages the next four.
 
 ---
 
-## Clock output
+## Clock output / MIDI
 
-GPIO8 is an output. It drives a **10 ms pulse** on every sequencer step, so
-another machine (a drum machine, a DAW, another Cinderwave) can follow this
+GPIO8 is the clock port. It drives a **10 ms pulse** on every sequencer step,
+so another machine (a drum machine, a DAW, another Cinderwave) can follow this
 one. The `CLOCK` function key switches it between:
 
 - **STP** — one pulse per step (a 16th-note clock)
 - **BET** — one pulse per beat (every 4 steps)
+- **MID** — a real MIDI clock on the same jack: `0xF8` ticks at 24 per
+  quarter note, plus `0xFA` (start) / `0xFC` (stop). GPIO8 doubles as UART1
+  TX, and the firmware reconfigures the pin automatically.
 - **OFF** — the pin idles low
 
-The pulses are generated inside the audio interrupt, so they stay locked to
-the sequencer no matter what the main loop is doing.
+Pulses and MIDI ticks are generated inside the audio interrupt, so they stay
+locked to the sequencer no matter what the main loop is doing.
 
 Wire it as a plain logic-level output with a common ground. The pulse is 3.3 V
 and 10 ms wide.
 
+For MIDI, wire the jack as a MIDI TRS-A **type A** output:
+
+```
+ GPIO8 (UART1 TX) ──[ 33 Ω ]── TIP    (MIDI pin 5)
+ 3V3              ──[ 33 Ω ]── RING   (MIDI pin 4)
+ GND                          ── SLEEVE (MIDI pin 2)
+```
+
+Any standard MIDI-in device (or a TRS-A-to-DIN adapter) then receives the
+clock.
+
 > Clock *input* (slaving this box to an external clock) is not implemented
 > yet. When it is, it will need a sequencer change in the core plus an edge
 > detector — see `Sequencer::setExternalClock()` in a later revision.
+
+---
+
+## Pattern storage
+
+The `SAVE` function key writes the current pattern, octave and waveform into
+a spare flash sector at offset **1 MiB** — far beyond the firmware image on
+both the 2 MiB (Pico/Pico W) and 4 MiB (Pico 2) boards. The pattern is
+restored automatically at the next power-up.
+
+Saving erases and reprograms a 4 KiB sector with interrupts disabled, so the
+audio mutes for a fraction of a second while it writes. If the flash already
+holds an identical image, the write is skipped entirely. `RESET` loads the
+demo pattern but never erases your save.
 
 ---
 

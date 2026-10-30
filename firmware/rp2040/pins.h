@@ -106,12 +106,13 @@ constexpr int kKeyPins[kNumKeys] = {
 };
 
 // ---------------------------------------------------------------------------
-// External clock output
+// Clock / MIDI output
 // ---------------------------------------------------------------------------
 
-// GP8 drives a short pulse (10 ms) on every sequencer step, or on every beat
-// if the clock mode is switched to BEAT. The TFT reset line is strapped to
-// 3V3, so this pin is not used by the display.
+// GP8 is the clock port. It has two personalities, switched at runtime:
+//   - a 10 ms pulse per sequencer step (or per beat) for pulse-clock gear
+//   - a real MIDI clock, because GP8 doubles as UART1 TX: 0xF8 ticks at
+//     24 per quarter note plus START / STOP (see midi.cpp)
 constexpr int kClockPin = 8;  // GP8
 
 } // namespace cwp

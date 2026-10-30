@@ -77,7 +77,8 @@ cmake --build build -j
 
 Hold **BOOTSEL** while plugging in the Pico, then drop
 `build/cinderwave_firmware.uf2` onto the `RPI-RP2` drive. It boots straight into
-the demo pattern.
+the demo pattern — or into the pattern you last saved with the `SAVE` function
+(see below).
 
 Every push builds the core, runs the unit tests, renders the demo WAV, and
 cross-compiles the RP2040 `.uf2` — both artifacts are uploaded from the run.
@@ -92,16 +93,25 @@ a map of the keys.
 |---------|--------|
 | Tap | toggle the gate of that step, and select it |
 | Medium hold | toggle the accent of that step |
-| **Two keys pressed together** | **PLAY / STOP** |
+| **Two keys held together (~60 ms)** | **PLAY / STOP** |
 | Long hold | become the function modifier — the grid switches to function labels |
 
-Pressing any two keys at once is the quick way to start and stop; the long
-hold is how the editing functions (accent, slide, octave, waveform, ...) are
-reached.
+Pressing any two keys and holding them together briefly is the quick way to
+start and stop. A brief overlap of the two presses is required, so fast
+step-taps with two fingers never trigger play/stop by accident; if either key
+is released before that, both keys act as normal taps. The long hold is how
+the editing functions (accent, slide, octave, waveform, ...) are reached.
 
 Turn the pots to sweep the filter and change tempo. The `CLOCK` function
-switches the GPIO8 clock output between a pulse per step, a pulse per beat,
-and off.
+switches the GPIO8 clock port between a pulse per step (`CLK STP`), a pulse
+per beat (`CLK BET`), a real MIDI clock on the same jack (`CLK MID` — 24
+ticks per quarter note plus START/STOP, GP8 driven as UART1 TX at 31250
+baud), and off.
+
+The `SAVE` function writes the current pattern, octave and waveform to a
+spare flash sector (audio mutes for a moment while it writes) and the
+pattern is restored automatically at the next power-up. `RESET` brings back
+the demo pattern; it does not erase your save.
 
 ## Layout
 

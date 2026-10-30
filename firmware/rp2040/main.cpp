@@ -9,7 +9,9 @@
 //          (a physical pot cross-mixes the two outside the MCU)
 //   Pots   cutoff=GP26(ADC0)  reso=GP28(ADC2)  tempo=GP27(ADC1)
 //   Keys   16 x Cherry MX in two rows of eight
-//   Clock  external clock OUT on GP8
+//   Clock  GP8 clock port: 10 ms pulse per step/beat, or UART1 MIDI clock
+//   Flash  pattern + octave + waveform persist at offset 1 MiB (SAVE key,
+//          restored at boot)
 //
 // Audio path: a PWM slice wraps at the engine sample rate; its wrap interrupt
 // renders exactly one synth sample and writes it as the next duty cycle.
@@ -33,7 +35,9 @@
 #include "audio.h"
 #include "display.h"
 #include "keypad.h"
+#include "midi.h"
 #include "pins.h"
+#include "storage.h"
 
 #include "cinderwave/synth.h"
 #include "cinderwave/oscillator.h"
@@ -68,8 +72,13 @@ constexpr uint32_t kTapMaxMs    = 400;  // shorter than this -> toggle gate
 constexpr uint32_t kFuncHoldMs  = 900;  // held at least this long -> function layer
 // (a hold between kTapMaxMs and kFuncHoldMs toggles the accent)
 
-// Two keys pressed within this window of each other count as a chord.
+// Two keys pressed within this window of each other start a chord.
 constexpr uint32_t kChordWindowMs = 80;
+
+// A chord only fires once both keys have been held down together for this
+// long. Without the overlap requirement, fast step-taps with two fingers
+// would randomly toggle play/stop.
+constexpr uint32_t kChordHoldMs = 60;
 
 // Width of the clock output pulse: 320 samples at 32 kHz == 10 ms.
 constexpr int kClockPulseSamples = 320;
@@ -80,10 +89,11 @@ constexpr int kClockPulseSamples = 320;
 
 enum class Mode { Step, Func };
 
-// What the GP8 clock output emits.
+// What the GP8 clock port emits.
 enum class ClockMode {
     Step,  // one pulse per sequencer step (a 16th-note clock)
     Beat,  // one pulse per beat (every 4 steps)
+    Midi,  // UART1 MIDI clock on the same pin: 24 ticks per beat
     Off,
 };
 
@@ -109,6 +119,10 @@ uint32_t  g_playStep     = 0;
 int       g_clockCountdown = 0;   // samples left in the current pulse
 uint32_t  g_lastClockPos   = 0;
 
+// MIDI clock phase in [0, 1) — one tick every time it wraps, written and read
+// only by the audio interrupt.
+float g_midiPhase = 0.0f;
+
 // Pot values, written by the main loop and picked up by the audio interrupt.
 volatile float g_potCutoff = 520.0f;
 volatile float g_potReso   = 9.0f;
@@ -127,6 +141,15 @@ float g_potTempoRaw = 0.5f;
 // Set by the interrupt when the pattern was replaced wholesale, so the main
 // loop can refresh its display copy.
 volatile bool g_resyncPattern = false;
+
+// Main-loop time, refreshed every loop iteration. Used to expire transient
+// status messages without threading absolute_time_t through the UI helpers.
+uint32_t g_nowMs = 0;
+
+// Transient status message shown in the hint line (e.g. after a save).
+char     g_statusMsg[24] = "";
+uint32_t g_statusMsgUntilMs = 0;
+uint32_t g_statusMsgGen = 0;      // bumped on every new message
 
 // ---------------------------------------------------------------------------
 // Edit queue: main loop -> audio interrupt
@@ -202,6 +225,7 @@ const char* clockModeText() {
     switch (g_clockMode) {
         case ClockMode::Step: return "CLK STP";
         case ClockMode::Beat: return "CLK BET";
+        case ClockMode::Midi: return "CLK MID";
         case ClockMode::Off:  return "CLK OFF";
     }
     return "CLK ???";
@@ -211,6 +235,13 @@ const char* clockModeText() {
 cw::Sample expmap(cw::Sample norm, cw::Sample lo, cw::Sample hi) {
     const cw::Sample n = cw::clampf(norm, 0.0f, 1.0f);
     return lo * std::pow(hi / lo, n);
+}
+
+// Show a transient message in the hint line for ~1.2 s.
+void postStatus(const char* s) {
+    snprintf(g_statusMsg, sizeof(g_statusMsg), "%s", s);
+    g_statusMsgUntilMs = g_nowMs + 1200;
+    ++g_statusMsgGen;
 }
 
 // ---------------------------------------------------------------------------
@@ -295,10 +326,15 @@ void applyAction(const Action& a) {
         }
         case kActStartSeq:
             seq.start();
+            if (g_clockMode == ClockMode::Midi) {
+                g_midiPhase = 1.0f;  // the first tick fires right after START
+                cwm::sendStart();
+            }
             break;
         case kActStopSeq:
             seq.stop();
             g_synth.voice().noteOff();
+            if (g_clockMode == ClockMode::Midi) cwm::sendStop();
             break;
     }
 }
@@ -328,9 +364,24 @@ cw::Sample renderSample() {
 
     const cw::Sample out = g_synth.renderSample();
 
-    // External clock output on GP8: a short pulse on every step (or every
-    // beat), so another machine can follow this one.
-    if (g_clockMode != ClockMode::Off) {
+    // External clock port on GP8. Two personalities:
+    //   Step/Beat — a 10 ms pulse per step (or per beat) for pulse-clock gear.
+    //   Midi      — UART1 TX on the same pin: 24 MIDI clock ticks per beat,
+    //               spread evenly across each step.
+    if (g_clockMode == ClockMode::Midi) {
+        // 6 ticks per 16th-note step. The increment is derived from the live
+        // tempo (samplesPerStep = 15 * sampleRate / bpm), so tempo changes
+        // stay in sync without losing phase.
+        const float bpm = g_synth.sequencer().tempo();
+        if (bpm > 1.0f) {
+            g_midiPhase +=
+                6.0f * bpm / (15.0f * static_cast<float>(cw::kSampleRate));
+            while (g_midiPhase >= 1.0f) {
+                g_midiPhase -= 1.0f;
+                cwm::sendTick();
+            }
+        }
+    } else if (g_clockMode != ClockMode::Off) {
         const uint32_t pos = static_cast<uint32_t>(g_synth.sequencer().position());
         if (pos != g_lastClockPos) {
             g_lastClockPos = pos;
@@ -356,7 +407,7 @@ cw::Sample renderSample() {
 
 const char* const kFuncLabels[16] = {
     "PLAY", "ACCT", "SLIDE", "OCT-", "OCT+", "WAVE", "TEMPO", "CLEAR",
-    "SEL-", "SEL+", "NOTE-", "NOTE+", "CLOCK", "REV", "DEMO", "RESET",
+    "SEL-", "SEL+", "NOTE-", "NOTE+", "CLOCK", "REV", "SAVE", "RESET",
 };
 
 void togglePlay() {
@@ -444,27 +495,44 @@ void runFunction(int index) {
                 queueAction(kActNudgeNote, g_selectedStep, 1);
             }
             break;
-        case 12:  // CLOCK
-            // Cycle the GP8 clock output: step -> beat -> off -> step.
+        case 12: {  // CLOCK
+            // Cycle the GP8 clock port: step -> beat -> midi -> off -> step.
             switch (g_clockMode) {
                 case ClockMode::Step: g_clockMode = ClockMode::Beat; break;
-                case ClockMode::Beat: g_clockMode = ClockMode::Off;  break;
+                case ClockMode::Beat: g_clockMode = ClockMode::Midi; break;
+                case ClockMode::Midi: g_clockMode = ClockMode::Off;  break;
                 case ClockMode::Off:  g_clockMode = ClockMode::Step; break;
             }
+            // GP8 changes personality with the mode: plain GPIO for pulses,
+            // UART1 TX for MIDI.
+            cwm::setPinMidi(g_clockMode == ClockMode::Midi);
+            if (g_clockMode == ClockMode::Midi) g_midiPhase = 0.0f;
             break;
+        }
         case 13:  // REV
             for (int i = 0; i < cw::kNumSteps; ++i) {
                 g_pattern[i] = g_pattern[cw::kNumSteps - 1 - i];
             }
             queueAction(kActReverse);
             break;
-        case 14:  // DEMO
-            queueAction(kActLoadDemo);
+        case 14: {  // SAVE — persist the pattern to flash
+            // Captured from g_pattern, the main loop's authoritative copy of
+            // the pattern (updated synchronously on every edit). The flash
+            // write stalls with interrupts off for ~50 ms, so audio briefly
+            // mutes — that is the price of an explicit save.
+            cws::SavedState st{};
+            for (int i = 0; i < cw::kNumSteps; ++i) st.steps[i] = g_pattern[i];
+            st.octave = static_cast<int8_t>(g_octave);
+            st.wave = static_cast<uint8_t>(g_synth.voice().patch().wave);
+            cws::save(st);
+            postStatus("PATTERN SAVED");
             break;
+        }
         case 15:  // RESET
             g_octave = 0;
             g_selectedStep = 0;
             g_clockMode = ClockMode::Step;
+            cwm::setPinMidi(false);
             queueAction(kActResetAll);
             break;
     }
@@ -490,102 +558,248 @@ cw::Sample readPot(int adcChannel) {
 }
 
 // ---------------------------------------------------------------------------
-// Drawing
+// Drawing — dirty-rect updates
 // ---------------------------------------------------------------------------
+//
+// A full-screen repaint pushes ~153 KB over SPI at 24 MHz, which takes about
+// 51 ms, stalls the keypad poll and makes the panel flicker. Instead the UI
+// keeps a shadow of everything it shows and redraws only the regions that
+// actually changed. A typical frame moves the playhead and maybe one text:
+// a few KB, roughly a millisecond.
 
-void drawGrid() {
-    for (int i = 0; i < 16; ++i) {
-        const int col = i % 8;
-        const int row = i / 8;
-        const int x = kGridX + col * (kCellW + kCellGap);
-        const int y = kGridY + row * (kCellH + kCellGap);
+struct UiShadow {
+    bool     valid        = false;
+    Mode     mode         = Mode::Step;
+    int      bpmTenths    = -1;
+    bool     running      = true;
+    cw::Step pattern[cw::kNumSteps];
+    int      selectedStep = -1;
+    int      selectedNote = -1;
+    uint32_t playStep     = 0xFFFFFFFFu;
+    int      cutoffPct    = -1;
+    int      resoPct      = -1;
+    int      wave         = -1;
+    int      octave       = -999;
+    int      clockMode    = -1;
+    int      hintDrawn    = -1;    // -1: hint shown; >= 0: status message gen
+};
 
-        if (g_mode == Mode::Func) {
-            g_display.fillRect(x, y, kCellW, kCellH, cwf::color::kDarkGrey);
-            const char* label = kFuncLabels[i];
-            g_display.drawText(x + (kCellW - textWidth(label)) / 2,
-                               y + (kCellH - 8) / 2, label,
-                               cwf::color::kWhite, cwf::color::kDarkGrey);
-            continue;
-        }
+UiShadow g_shadow;
 
-        const cw::Step& st = g_pattern[i];
-        const bool on = st.gate;
-        const uint16_t bg = on ? cwf::color::kGreen : cwf::color::kDarkGrey;
-        const uint16_t fg = on ? cwf::color::kBlack : cwf::color::kWhite;
+void drawCell(int i) {
+    const int col = i % 8;
+    const int row = i / 8;
+    const int x = kGridX + col * (kCellW + kCellGap);
+    const int y = kGridY + row * (kCellH + kCellGap);
 
-        g_display.fillRect(x, y, kCellW, kCellH, bg);
+    if (g_mode == Mode::Func) {
+        g_display.fillRect(x, y, kCellW, kCellH, cwf::color::kDarkGrey);
+        const char* label = kFuncLabels[i];
+        g_display.drawText(x + (kCellW - textWidth(label)) / 2,
+                           y + (kCellH - 8) / 2, label,
+                           cwf::color::kWhite, cwf::color::kDarkGrey);
+        return;
+    }
 
-        char num[3];
-        snprintf(num, sizeof(num), "%d", i + 1);
-        g_display.drawText(x + 4, y + 4, num, fg, bg);
+    const cw::Step& st = g_pattern[i];
+    const bool on = st.gate;
+    const uint16_t bg = on ? cwf::color::kGreen : cwf::color::kDarkGrey;
+    const uint16_t fg = on ? cwf::color::kBlack : cwf::color::kWhite;
 
-        if (st.accent) {
-            g_display.fillRect(x + kCellW - 9, y + 4, 6, 6, cwf::color::kRed);
-        }
-        if (st.slide) {
-            g_display.fillRect(x + 9, y + kCellH - 8, kCellW - 18, 3, cwf::color::kYellow);
-        }
-        if (i == g_selectedStep) {
-            g_display.fillRect(x + 4, y + kCellH - 7, 5, 5, cwf::color::kWhite);
-        }
-        if (i == static_cast<int>(g_playStep)) {
-            g_display.drawRect(x, y, kCellW, kCellH, cwf::color::kCyan);
-        }
+    g_display.fillRect(x, y, kCellW, kCellH, bg);
+
+    char num[3];
+    snprintf(num, sizeof(num), "%d", i + 1);
+    g_display.drawText(x + 4, y + 4, num, fg, bg);
+
+    if (st.accent) {
+        g_display.fillRect(x + kCellW - 9, y + 4, 6, 6, cwf::color::kRed);
+    }
+    if (st.slide) {
+        g_display.fillRect(x + 9, y + kCellH - 8, kCellW - 18, 3, cwf::color::kYellow);
+    }
+    if (i == g_selectedStep) {
+        g_display.fillRect(x + 4, y + kCellH - 7, 5, 5, cwf::color::kWhite);
+    }
+    if (i == static_cast<int>(g_playStep)) {
+        g_display.drawRect(x, y, kCellW, kCellH, cwf::color::kCyan);
     }
 }
 
-void drawUi() {
-    // ---- header ----------------------------------------------------------
-    g_display.fillRect(0, 0, 320, kHeaderH, cwf::color::kMidGrey);
-    g_display.drawText(4, 6, "CINDERWAVE", cwf::color::kBlack, cwf::color::kMidGrey);
+void drawAllCells() {
+    for (int i = 0; i < cw::kNumSteps; ++i) drawCell(i);
+}
 
+// The right-hand part of the header (BPM + run state) is drawn together,
+// because the RUN/STOP position depends on the width of the BPM text.
+void drawHeaderRight() {
+    g_display.fillRect(226, 4, 90, 12, cwf::color::kMidGrey);
     char bpm[16];
-    snprintf(bpm, sizeof(bpm), "%.1f BPM", static_cast<double>(g_synth.sequencer().tempo()));
+    snprintf(bpm, sizeof(bpm), "%.1f BPM",
+             static_cast<double>(g_synth.sequencer().tempo()));
     drawTextRight(316, 6, bpm, cwf::color::kBlack, cwf::color::kMidGrey);
-
     const char* state = g_running ? "RUN" : "STOP";
     const uint16_t stateColor = g_running ? cwf::color::kGreen : cwf::color::kRed;
     drawTextRight(316 - textWidth(bpm) - 10, 6, state, stateColor, cwf::color::kMidGrey);
+}
 
-    // ---- grid ------------------------------------------------------------
-    drawGrid();
+void drawHint() {
+    g_display.fillRect(0, kHintY - 2, 320, 12, cwf::color::kBlack);
+    const char* hint = (g_mode == Mode::Func)
+        ? "FUNC: TAP A KEY"
+        : "TAP=STEP  2KEYS=PLAY  HOLD=FUNC";
+    g_display.drawText((320 - textWidth(hint)) / 2, kHintY, hint,
+                       cwf::color::kGrey, cwf::color::kBlack);
+}
 
-    // ---- parameter bars --------------------------------------------------
+// Full repaint — boot only, and only the static chrome. Every dynamic value
+// is painted by the dirty checks in updateUi() on the first pass, because
+// their shadow entries start at "unset" sentinel values.
+void drawAllUi() {
+    g_display.fillScreen(cwf::color::kBlack);
+
+    g_display.fillRect(0, 0, 320, kHeaderH, cwf::color::kMidGrey);
+    g_display.drawText(4, 6, "CINDERWAVE", cwf::color::kBlack, cwf::color::kMidGrey);
+
     g_display.drawText(2, kBarY1 + 1, "CUTOFF", cwf::color::kWhite, cwf::color::kBlack);
-    g_display.drawBar(48, kBarY1, 110, 10,
-                      g_potCutoff / 6000.0f, cwf::color::kCyan, cwf::color::kDarkGrey);
-
     g_display.drawText(2, kBarY2 + 1, "RESO", cwf::color::kWhite, cwf::color::kBlack);
-    g_display.drawBar(48, kBarY2, 110, 10,
-                      (g_potReso - 0.7f) / 17.3f, cwf::color::kMagenta, cwf::color::kDarkGrey);
 
-    g_display.drawText(170, kBarY1 + 1, waveName(g_synth.voice().patch().wave),
-                       cwf::color::kYellow, cwf::color::kBlack);
-    char oct[12];
-    snprintf(oct, sizeof(oct), "OCT %+d", g_octave);
-    g_display.drawText(170, kBarY2 + 1, oct, cwf::color::kWhite, cwf::color::kBlack);
-
-    // ---- status ----------------------------------------------------------
-    char line[24];
-    snprintf(line, sizeof(line), "STEP %02d", g_selectedStep + 1);
-    g_display.drawText(2, kStatusY1, line, cwf::color::kWhite, cwf::color::kBlack);
-    g_display.drawText(70, kStatusY1, noteName(g_pattern[g_selectedStep].note),
-                       cwf::color::kGreen, cwf::color::kBlack);
-    drawTextRight(316, kStatusY1, clockModeText(),
-                  g_clockMode == ClockMode::Off ? cwf::color::kMidGrey : cwf::color::kOrange,
-                  cwf::color::kBlack);
+    drawAllCells();
+    drawHint();
 
     g_display.drawText(2, kStatusY2, "GP2", cwf::color::kWhite, cwf::color::kBlack);
     g_display.drawText(48, kStatusY2, "FREE", cwf::color::kMidGrey, cwf::color::kBlack);
     drawTextRight(316, kStatusY2, "MIX POT = A/B", cwf::color::kMidGrey, cwf::color::kBlack);
+}
 
-    // ---- hint ------------------------------------------------------------
-    const char* hint = (g_mode == Mode::Func)
-        ? "FUNC: TAP A KEY"
-        : "TAP=STEP  2KEYS=PLAY  HOLD=FUNC";
-    const int w = textWidth(hint);
-    g_display.drawText((320 - w) / 2, kHintY, hint, cwf::color::kGrey, cwf::color::kBlack);
+// Incremental update: called at ~16 Hz, redraws only what changed.
+void updateUi() {
+    UiShadow& s = g_shadow;
+
+    const bool selChanged = (g_selectedStep != s.selectedStep);
+
+    if (!s.valid) {
+        drawAllUi();
+        s.valid        = true;
+        s.mode         = g_mode;
+        s.playStep     = g_playStep;
+        s.selectedStep = g_selectedStep;
+        s.selectedNote = g_pattern[g_selectedStep].note;
+        for (int i = 0; i < cw::kNumSteps; ++i) s.pattern[i] = g_pattern[i];
+        // Dynamic texts and bars fall through to the dirty checks below.
+    }
+
+    // ---- header: BPM + run state -----------------------------------------
+    const int bpmTenths =
+        static_cast<int>(g_synth.sequencer().tempo() * 10.0f + 0.5f);
+    if (bpmTenths != s.bpmTenths || g_running != s.running) {
+        drawHeaderRight();
+        s.bpmTenths = bpmTenths;
+        s.running   = g_running;
+    }
+
+    // ---- grid --------------------------------------------------------------
+    if (g_mode != s.mode) {
+        drawAllCells();
+        s.mode         = g_mode;
+        s.playStep     = g_playStep;
+        s.selectedStep = g_selectedStep;
+        s.hintDrawn    = -2;  // the hint text changes with the mode
+        for (int i = 0; i < cw::kNumSteps; ++i) s.pattern[i] = g_pattern[i];
+    } else if (g_mode == Mode::Step) {
+        const int prevPlay = static_cast<int>(s.playStep);
+        const int nowPlay  = static_cast<int>(g_playStep);
+        for (int i = 0; i < cw::kNumSteps; ++i) {
+            const cw::Step& a = g_pattern[i];
+            const cw::Step& b = s.pattern[i];
+            const bool changed = a.gate != b.gate || a.accent != b.accent ||
+                                 a.slide != b.slide || a.note != b.note;
+            const bool play = (i == nowPlay) != (i == prevPlay);
+            const bool sel  = (i == g_selectedStep) != (i == s.selectedStep);
+            if (changed || play || sel) drawCell(i);
+            s.pattern[i] = a;
+        }
+        s.playStep     = g_playStep;
+        s.selectedStep = g_selectedStep;
+    }
+
+    // ---- parameter bars ----------------------------------------------------
+    const int cutoffPct =
+        static_cast<int>(g_potCutoff / 6000.0f * 200.0f + 0.5f);
+    if (cutoffPct != s.cutoffPct) {
+        g_display.drawBar(48, kBarY1, 110, 10,
+                          g_potCutoff / 6000.0f, cwf::color::kCyan,
+                          cwf::color::kDarkGrey);
+        s.cutoffPct = cutoffPct;
+    }
+
+    const int resoPct =
+        static_cast<int>((g_potReso - 0.7f) / 17.3f * 200.0f + 0.5f);
+    if (resoPct != s.resoPct) {
+        g_display.drawBar(48, kBarY2, 110, 10,
+                          (g_potReso - 0.7f) / 17.3f, cwf::color::kMagenta,
+                          cwf::color::kDarkGrey);
+        s.resoPct = resoPct;
+    }
+
+    const int wave = static_cast<int>(g_synth.voice().patch().wave);
+    if (wave != s.wave) {
+        g_display.fillRect(166, kBarY1 - 2, 60, 12, cwf::color::kBlack);
+        g_display.drawText(170, kBarY1 + 1,
+                           waveName(g_synth.voice().patch().wave),
+                           cwf::color::kYellow, cwf::color::kBlack);
+        s.wave = wave;
+    }
+
+    if (g_octave != s.octave) {
+        char oct[12];
+        snprintf(oct, sizeof(oct), "OCT %+d", g_octave);
+        g_display.fillRect(166, kBarY2 - 2, 60, 12, cwf::color::kBlack);
+        g_display.drawText(170, kBarY2 + 1, oct,
+                           cwf::color::kWhite, cwf::color::kBlack);
+        s.octave = g_octave;
+    }
+
+    // ---- status line -------------------------------------------------------
+    if (selChanged ||
+        g_pattern[g_selectedStep].note != s.selectedNote) {
+        char line[24];
+        snprintf(line, sizeof(line), "STEP %02d", g_selectedStep + 1);
+        g_display.drawText(2, kStatusY1, line,
+                           cwf::color::kWhite, cwf::color::kBlack);
+        g_display.fillRect(68, kStatusY1 - 2, 60, 12, cwf::color::kBlack);
+        g_display.drawText(70, kStatusY1,
+                           noteName(g_pattern[g_selectedStep].note),
+                           cwf::color::kGreen, cwf::color::kBlack);
+        s.selectedStep = g_selectedStep;
+        s.selectedNote = g_pattern[g_selectedStep].note;
+    }
+
+    const int clockMode = static_cast<int>(g_clockMode);
+    if (clockMode != s.clockMode) {
+        g_display.fillRect(268, kStatusY1 - 2, 50, 12, cwf::color::kBlack);
+        const uint16_t clkColor = g_clockMode == ClockMode::Off ? cwf::color::kMidGrey
+                                : g_clockMode == ClockMode::Midi ? cwf::color::kCyan
+                                                                 : cwf::color::kOrange;
+        drawTextRight(316, kStatusY1, clockModeText(), clkColor,
+                      cwf::color::kBlack);
+        s.clockMode = clockMode;
+    }
+
+    // ---- hint / transient status message ----------------------------------
+    const bool msgActive = g_statusMsgGen != 0 && g_statusMsgUntilMs > g_nowMs;
+    const int wantHint = msgActive ? static_cast<int>(g_statusMsgGen) : -1;
+    if (wantHint != s.hintDrawn) {
+        if (msgActive) {
+            g_display.fillRect(0, kHintY - 2, 320, 12, cwf::color::kBlack);
+            g_display.drawText((320 - textWidth(g_statusMsg)) / 2, kHintY,
+                               g_statusMsg, cwf::color::kWhite,
+                               cwf::color::kBlack);
+        } else {
+            drawHint();
+        }
+        s.hintDrawn = wantHint;
+    }
 }
 
 } // namespace
@@ -613,8 +827,29 @@ int main() {
     gpio_set_dir(cwp::kClockPin, GPIO_OUT);
     gpio_put(cwp::kClockPin, 0);
 
+    // ---- MIDI clock --------------------------------------------------------
+    // UART1 is set up at boot; the GP8 pin stays a plain GPIO output until
+    // the CLOCK function is switched to MIDI.
+    cwm::init();
+
     // ---- pattern ---------------------------------------------------------
-    g_synth.loadDemoPattern();
+    // Restore the last saved pattern from flash; fall back to the demo
+    // pattern on fresh or unreadable flash. At this point the audio
+    // interrupt is not running yet, so the sequencer can be touched directly.
+    cws::SavedState saved{};
+    if (cws::load(saved)) {
+        for (int i = 0; i < cw::kNumSteps; ++i) {
+            g_synth.sequencer().setStep(i, saved.steps[i]);
+        }
+        if (saved.wave <= 3) {
+            cw::Patch p = g_synth.voice().patch();
+            p.wave = static_cast<cw::Waveform>(saved.wave);
+            g_synth.voice().setPatch(p);
+        }
+        g_octave = saved.octave;
+    } else {
+        g_synth.loadDemoPattern();
+    }
     g_synth.sequencer().setTempo(130.0f);
     g_synth.sequencer().start();
     syncPatternFromSequencer();
@@ -622,7 +857,7 @@ int main() {
     // ---- audio -----------------------------------------------------------
     g_audio.init(renderSample);
 
-    drawUi();
+    updateUi();
 
     // Scheduling deadlines. The Pico SDK 2.x time API is timestamp based, so
     // these are absolute_time_t rather than plain counters.
@@ -632,14 +867,22 @@ int main() {
 
     uint32_t pressStartMs[16] = {};
 
-    // Chord detection: the first key of a chord and the moment it went down.
-    int      g_chordPartner = -1;
-    uint32_t g_chordStartMs = 0;
+    // Chord detection state. A second key inside the chord window only opens
+    // a *pending* chord; it becomes play/stop once both keys are still held
+    // after kChordHoldMs. If either key is released first the chord is
+    // cancelled and both keys fall back to normal tap/hold handling, so
+    // quick step-taps never trigger play/stop.
+    int      g_chordFirst    = -1;  // first key of a potential chord
+    uint32_t g_chordFirstMs  = 0;   // when it went down
+    bool     g_chordPending  = false;
+    int      g_chordSecond   = -1;  // second key
+    uint32_t g_chordStartMs  = 0;   // when both were down at once
     uint32_t g_chordConsumed = 0;
 
     while (true) {
         const absolute_time_t now = get_absolute_time();
         const uint32_t nowMs = to_ms_since_boot(now);
+        g_nowMs = nowMs;
 
         // ---- keypad: drain the event queue --------------------------------
         if (absolute_time_diff_us(now, nextPoll) >= 0) {
@@ -652,21 +895,28 @@ int main() {
                 if (ev.down) {
                     pressStartMs[index] = nowMs;
 
-                    // Two keys pressed close together form a chord, and a
-                    // chord is the play/stop gesture. Both keys are consumed
-                    // so their releases do not toggle a step.
-                    if (g_chordPartner >= 0 && g_chordPartner != index &&
-                        (nowMs - g_chordStartMs) <= kChordWindowMs) {
-                        g_chordConsumed |= (1u << g_chordPartner) | (1u << index);
-                        g_chordPartner = -1;
-                        togglePlay();
-                    } else {
-                        g_chordPartner = index;
+                    // A second key inside the chord window opens a pending
+                    // chord; confirmation happens in the poll check below.
+                    if (!g_chordPending && g_chordFirst >= 0 &&
+                        g_chordFirst != index &&
+                        (nowMs - g_chordFirstMs) <= kChordWindowMs) {
+                        g_chordPending = true;
+                        g_chordSecond  = index;
                         g_chordStartMs = nowMs;
+                    } else if (!g_chordPending) {
+                        g_chordFirst    = index;
+                        g_chordFirstMs  = nowMs;
                     }
                 } else {
-                    if (g_chordPartner == index) {
-                        g_chordPartner = -1;
+                    if (g_chordPending &&
+                        (index == g_chordFirst || index == g_chordSecond)) {
+                        // A chord key went up before the overlap window
+                        // closed: not a chord. Cancel it and fall through so
+                        // this release is processed as a normal tap or hold.
+                        g_chordPending = false;
+                        g_chordSecond  = -1;
+                    } else if (index == g_chordFirst) {
+                        g_chordFirst = -1;
                     }
                     if (g_chordConsumed & (1u << index)) {
                         g_chordConsumed &= ~(1u << index);
@@ -700,11 +950,27 @@ int main() {
                 }
             }
 
+            // Confirm a pending chord: after the overlap window both keys
+            // must still be down. Then it is play/stop, and both keys are
+            // consumed so their releases do not toggle a step.
+            if (g_chordPending && (nowMs - g_chordStartMs) >= kChordHoldMs) {
+                const uint32_t mask = g_keypad.pressedMask();
+                if (((mask >> g_chordFirst) & 1u) &&
+                    ((mask >> g_chordSecond) & 1u)) {
+                    g_chordConsumed |= (1u << g_chordFirst) | (1u << g_chordSecond);
+                    togglePlay();
+                    g_chordPending = false;
+                    g_chordSecond  = -1;
+                    g_chordFirst   = -1;
+                }
+            }
+
             // A key held long enough becomes the function modifier.
             if (g_funcModifier < 0) {
                 const uint32_t mask = g_keypad.pressedMask();
                 for (int i = 0; i < 16; ++i) {
                     if ((mask >> i) & 1u) {
+                        if (g_chordConsumed & (1u << i)) continue;
                         if (nowMs - pressStartMs[i] >= kFuncHoldMs) {
                             g_funcModifier = i;
                             g_mode = Mode::Func;
@@ -736,7 +1002,7 @@ int main() {
         g_playStep = static_cast<uint32_t>(g_synth.sequencer().position());
         if (static_cast<int32_t>(nowMs - nextUiMs) >= 0) {
             nextUiMs = nowMs + 60;  // ~16 Hz
-            drawUi();
+            updateUi();
         }
 
         tight_loop_contents();
