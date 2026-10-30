@@ -17,7 +17,7 @@ constexpr uint8_t kMidiTick  = 0xF8;
 
 // Non-blocking write: drop rather than stall the audio interrupt.
 inline void send(uint8_t b) {
-    if (uart_writable(uart1)) {
+    if (uart_is_writable(uart1)) {
         uart_putc_raw(uart1, b);
     }
 }
