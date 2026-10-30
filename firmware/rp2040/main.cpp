@@ -10,8 +10,9 @@
 //   Pots   cutoff=GP26(ADC0)  reso=GP28(ADC2)  tempo=GP27(ADC1)
 //   Keys   16 x Cherry MX in two rows of eight
 //   Clock  GP8 clock port: 10 ms pulse per step/beat, or UART1 MIDI clock
-//   Flash  pattern + octave + waveform persist at offset 1 MiB (SAVE key,
-//          restored at boot)
+//   Flash  pattern + octave + waveform + tempo offset persist in a ring of
+//          snapshots at the end of the flash (written when the instrument
+//          goes quiet, restored at boot)
 //
 // Audio path: a PWM slice wraps at the engine sample rate; its wrap interrupt
 // renders exactly one synth sample and writes it as the next duty cycle.
@@ -151,6 +152,11 @@ char     g_statusMsg[24] = "";
 uint32_t g_statusMsgUntilMs = 0;
 uint32_t g_statusMsgGen = 0;      // bumped on every new message
 
+// Pattern persistence. The pattern is written back to the flash whenever the
+// instrument goes quiet, so it survives a power cycle.
+bool     g_savePending = false;
+uint32_t g_saveDirtyMs = 0;
+
 // ---------------------------------------------------------------------------
 // Edit queue: main loop -> audio interrupt
 // ---------------------------------------------------------------------------
@@ -242,6 +248,32 @@ void postStatus(const char* s) {
     snprintf(g_statusMsg, sizeof(g_statusMsg), "%s", s);
     g_statusMsgUntilMs = g_nowMs + 1200;
     ++g_statusMsgGen;
+}
+
+// ---------------------------------------------------------------------------
+// Pattern persistence
+// ---------------------------------------------------------------------------
+
+// An edit happened: remember it so that it reaches the flash.
+void markPatternDirty() {
+    g_savePending = true;
+    g_saveDirtyMs = g_nowMs;
+}
+
+// Writes the current pattern to the flash. This blocks: erasing a sector
+// takes ~45 ms, during which the audio interrupt is held off, so it is only
+// done while nothing is sounding.
+bool savePatternNow() {
+    cws::SavedState st{};
+    for (int i = 0; i < cw::kNumSteps; ++i) st.steps[i] = g_pattern[i];
+    st.octave = static_cast<int8_t>(g_octave);
+    st.wave = static_cast<uint8_t>(g_synth.voice().patch().wave);
+    st.tempoOffset = g_tempoOffset;
+
+    const bool ok = cws::save(st);
+    g_savePending = false;
+    postStatus(ok ? "PATTERN SAVED" : "SAVE FAILED");
+    return ok;
 }
 
 // ---------------------------------------------------------------------------
@@ -435,10 +467,12 @@ void runFunction(int index) {
         case 1:  // ACCT
             g_pattern[g_selectedStep].accent = !g_pattern[g_selectedStep].accent;
             queueAction(kActToggleAccent, g_selectedStep);
+            markPatternDirty();
             break;
         case 2:  // SLIDE
             g_pattern[g_selectedStep].slide = !g_pattern[g_selectedStep].slide;
             queueAction(kActToggleSlide, g_selectedStep);
+            markPatternDirty();
             break;
         case 3:  // OCT-
             if (g_octave > -3) {
@@ -450,6 +484,7 @@ void runFunction(int index) {
                 }
                 queueAction(kActTranspose, 0, -12);
             }
+            markPatternDirty();
             break;
         case 4:  // OCT+
             if (g_octave < 3) {
@@ -461,10 +496,12 @@ void runFunction(int index) {
                 }
                 queueAction(kActTranspose, 0, 12);
             }
+            markPatternDirty();
             break;
         case 5: {  // WAVE
             const int next = (static_cast<int>(g_synth.voice().patch().wave) + 1) % 4;
             queueAction(kActSetWave, 0, next);
+            markPatternDirty();
             break;
         }
         case 6:  // TEMPO
@@ -472,10 +509,12 @@ void runFunction(int index) {
             // becomes 130 BPM. Without the offset the next pot reading would
             // immediately override this.
             g_tempoOffset = 130.0f - (60.0f + g_potTempoRaw * 120.0f);
+            markPatternDirty();
             break;
         case 7:  // CLEAR
             for (int i = 0; i < cw::kNumSteps; ++i) g_pattern[i] = cw::Step{};
             queueAction(kActClearPattern);
+            markPatternDirty();
             break;
         case 8:  // SEL-
             g_selectedStep = (g_selectedStep + cw::kNumSteps - 1) % cw::kNumSteps;
@@ -488,12 +527,14 @@ void runFunction(int index) {
                 --g_pattern[g_selectedStep].note;
                 queueAction(kActNudgeNote, g_selectedStep, -1);
             }
+            markPatternDirty();
             break;
         case 11:  // NOTE+
             if (g_pattern[g_selectedStep].note < 127) {
                 ++g_pattern[g_selectedStep].note;
                 queueAction(kActNudgeNote, g_selectedStep, 1);
             }
+            markPatternDirty();
             break;
         case 12: {  // CLOCK
             // Cycle the GP8 clock port: step -> beat -> midi -> off -> step.
@@ -514,20 +555,14 @@ void runFunction(int index) {
                 g_pattern[i] = g_pattern[cw::kNumSteps - 1 - i];
             }
             queueAction(kActReverse);
+            markPatternDirty();
             break;
-        case 14: {  // SAVE — persist the pattern to flash
-            // Captured from g_pattern, the main loop's authoritative copy of
-            // the pattern (updated synchronously on every edit). The flash
-            // write stalls with interrupts off for ~50 ms, so audio briefly
-            // mutes — that is the price of an explicit save.
-            cws::SavedState st{};
-            for (int i = 0; i < cw::kNumSteps; ++i) st.steps[i] = g_pattern[i];
-            st.octave = static_cast<int8_t>(g_octave);
-            st.wave = static_cast<uint8_t>(g_synth.voice().patch().wave);
-            cws::save(st);
-            postStatus("PATTERN SAVED");
+        case 14:  // SAVE — persist the pattern to flash
+            // Writes it right now, even while the sequencer is playing. The
+            // flash write stalls with interrupts off for up to ~45 ms, so the
+            // audio briefly mutes — that is the price of an explicit save.
+            savePatternNow();
             break;
-        }
         case 15:  // RESET
             g_octave = 0;
             g_selectedStep = 0;
@@ -847,8 +882,13 @@ int main() {
             g_synth.voice().setPatch(p);
         }
         g_octave = saved.octave;
+        g_tempoOffset = saved.tempoOffset;
+        postStatus("PATTERN LOADED");
     } else {
         g_synth.loadDemoPattern();
+        // Nothing stored yet: store the demo pattern on the first quiet
+        // moment, so the flash holds a valid record from now on.
+        markPatternDirty();
     }
     g_synth.sequencer().setTempo(130.0f);
     g_synth.sequencer().start();
@@ -942,10 +982,12 @@ int main() {
                         g_pattern[index].gate = !g_pattern[index].gate;
                         g_selectedStep = index;
                         queueAction(kActToggleGate, index);
+                        markPatternDirty();
                     } else if (held < kFuncHoldMs) {
                         // Medium hold: toggle the accent of this step.
                         g_pattern[index].accent = !g_pattern[index].accent;
                         queueAction(kActToggleAccent, index);
+                        markPatternDirty();
                     }
                 }
             }
@@ -996,6 +1038,24 @@ int main() {
         if (g_resyncPattern) {
             g_resyncPattern = false;
             syncPatternFromSequencer();
+            // RESET replaces the pattern in the audio interrupt, so this is
+            // the first moment where the new pattern is known.
+            markPatternDirty();
+        }
+
+        // ---- pattern persistence -------------------------------------------
+        // Writing to the flash takes the chip out of execute-in-place mode,
+        // so it may only happen while nothing is sounding: the sequencer is
+        // stopped, or the step that is currently playing is silent. If the
+        // pattern never goes quiet, the 10 s fallback still gets it stored.
+        if (g_savePending) {
+            const uint32_t pos = static_cast<uint32_t>(g_synth.sequencer().position());
+            const bool quiet = !g_running ||
+                               (pos < cw::kNumSteps && !g_pattern[pos].gate);
+            const bool stale = static_cast<int32_t>(nowMs - g_saveDirtyMs) > 10000;
+            if (quiet || stale) {
+                savePatternNow();
+            }
         }
 
         // ---- UI ------------------------------------------------------------

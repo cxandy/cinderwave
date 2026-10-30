@@ -108,10 +108,12 @@ per beat (`CLK BET`), a real MIDI clock on the same jack (`CLK MID` — 24
 ticks per quarter note plus START/STOP, GP8 driven as UART1 TX at 31250
 baud), and off.
 
-The `SAVE` function writes the current pattern, octave and waveform to a
-spare flash sector (audio mutes for a moment while it writes) and the
-pattern is restored automatically at the next power-up. `RESET` brings back
-the demo pattern; it does not erase your save.
+The pattern is written back to the flash when the instrument goes quiet, so it
+is still there after a power cycle — the `SAVE` function writes it right away.
+The 16 steps, the octave, the waveform and the tempo offset are stored in a
+ring of snapshots at the end of the flash, with a CRC on each one, so a power
+cut during a write cannot corrupt the pattern. `RESET` brings back the demo
+pattern; it does not erase your save.
 
 ## Layout
 
@@ -124,6 +126,9 @@ firmware/rp2040/      Pico SDK target: PWM audio + TFT + keypad + pots
   audio.cpp/h           PWM audio output on OUT-A (GP15)
   display.cpp/h         ILI9341 SPI driver and drawing primitives
   keypad.cpp/h          16-key scanner with time-based debouncing
+  midi.cpp/h            MIDI clock on GP8 (UART1 TX)
+  storage.cpp/h         Pattern snapshots in the last flash sectors
+  storage_format.h      On-flash record format + ring bookkeeping (host-tested)
   font5x7.h             5x7 bitmap font
   bin2uf2.py            bin -> UF2 packer (keeps picotool out of CI)
 tests/                Dependency-free unit tests (built and run in CI)

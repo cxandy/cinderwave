@@ -140,9 +140,9 @@ grid is always a map of the keys.
 | 2 | ACCENT (on the selected step) | 10 | SELECT + |
 | 3 | SLIDE (on the selected step) | 11 | NOTE − |
 | 4 | OCTAVE − (transposes the pattern) | 12 | NOTE + |
-| 5 | OCTAVE + (transposes the pattern) | 13 | CLOCK (step / beat / off) |
+| 5 | OCTAVE + (transposes the pattern) | 13 | CLOCK (step / beat / MIDI / off) |
 | 6 | WAVEFORM | 14 | REVERSE the pattern |
-| 7 | TEMPO (re-zero the pot at 130 BPM) | 15 | DEMO (reload the demo pattern) |
+| 7 | TEMPO (re-zero the pot at 130 BPM) | 15 | SAVE (write the pattern to the flash) |
 | 8 | CLEAR pattern | 16 | RESET everything |
 
 ---
@@ -200,15 +200,43 @@ clock.
 
 ## Pattern storage
 
-The `SAVE` function key writes the current pattern, octave and waveform into
-a spare flash sector at offset **1 MiB** — far beyond the firmware image on
-both the 2 MiB (Pico/Pico W) and 4 MiB (Pico 2) boards. The pattern is
-restored automatically at the next power-up.
+The pattern survives a power cycle. The last four sectors of the Pico's flash
+(16 KB, at 0x1FC000 on a 2 MB board) hold a **ring of 64 snapshots**, one per
+256-byte page, and the newest valid one is restored at the next power-up.
 
-Saving erases and reprograms a 4 KiB sector with interrupts disabled, so the
-audio mutes for a fraction of a second while it writes. If the flash already
-holds an identical image, the write is skipped entirely. `RESET` loads the
-demo pattern but never erases your save.
+What is stored: the 16 steps (note, gate, accent, slide), the octave, the
+waveform and the tempo offset. The tempo *pot* is not stored — it is a
+physical knob, so the offset that was applied to it is.
+
+**When it is written**
+
+- Automatically, whenever the instrument is quiet: the sequencer is stopped,
+  or the step that is currently playing is silent. Writing to flash takes the
+  chip out of execute-in-place mode, so it must not happen while something is
+  sounding. If the pattern never goes quiet, it is written anyway 10 seconds
+  after the last edit.
+- Immediately when you press the `SAVE` function key. That one writes even
+  while the sequencer is playing, so you may hear a short dropout (up to
+  ~45 ms when a sector has to be erased, otherwise under a millisecond).
+
+The hint line shows `PATTERN SAVED` after a successful write and
+`PATTERN LOADED` when a stored pattern was restored at boot.
+
+**How it is made safe**
+
+- A snapshot is never written over the page that holds the live one, so a
+  power cut during a write leaves the previous pattern intact.
+- Every snapshot carries a CRC32; a half-written page fails the checksum and
+  is ignored.
+- The firmware refuses to touch the storage area if the program image ever
+  grows into it.
+
+`RESET` brings back the demo pattern but never erases your save.
+
+The record format and the ring bookkeeping live in
+`firmware/rp2040/storage_format.h`; they are covered by the host test suite
+(`tests/test_storage.cpp`), which runs the same code against a byte buffer
+instead of real flash.
 
 ---
 

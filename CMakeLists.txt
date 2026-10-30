@@ -48,7 +48,13 @@ add_executable(cinderwave_tests
     tests/test_filter.cpp
     tests/test_sequencer.cpp
     tests/test_voice.cpp
+    tests/test_storage.cpp
 )
-target_include_directories(cinderwave_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+target_include_directories(cinderwave_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests
+    # The pattern storage format is shared with the firmware and is tested
+    # here against a byte buffer instead of real flash.
+    ${CMAKE_CURRENT_SOURCE_DIR}/firmware/rp2040
+)
 target_link_libraries(cinderwave_tests PRIVATE cinderwave_core)
 add_test(NAME cinderwave_tests COMMAND cinderwave_tests)
